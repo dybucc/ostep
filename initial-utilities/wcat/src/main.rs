@@ -1,15 +1,20 @@
 use std::env;
-use std::io::Result;
+use std::fs;
+use std::io::Error;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
-type Args = Vec<PathBuf>;
+fn main() -> ExitCode {
+    match env::args_os().skip(1).try_fold((), |_, e| {
+        let path = PathBuf::from(e).canonicalize()?;
+        println!("{}", fs::read_to_string(path)?);
 
-fn main() -> Result<()> {
-    let proc_args: Args = env::args_os().skip(1).map(|e| {
-        let new = PathBuf::from(e);
-
-        new.try_exists().and_then(|e| e.then_some().ok())
-    }).collect::<Result<Vec<_>, _>>();
-
-    Ok(())
+        Ok::<_, Error>(())
+    }) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(_) => {
+            eprintln!("wcat: cannot open file");
+            ExitCode::FAILURE
+        }
+    }
 }
