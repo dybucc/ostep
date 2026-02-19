@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    fs,
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Ok, Result, anyhow};
 
@@ -10,8 +14,8 @@ struct Test {
     rc: String,
     run: String,
     desc: String,
-    pre: String,
-    post: String,
+    pre: Option<String>,
+    post: Option<String>,
 }
 
 impl Default for Test {
@@ -23,8 +27,8 @@ impl Default for Test {
             rc: String::default(),
             run: String::default(),
             desc: String::default(),
-            pre: String::default(),
-            post: String::default(),
+            pre: Option::default(),
+            post: Option::default(),
         }
     }
 }
@@ -41,10 +45,10 @@ fn main() -> Result<()> {
                         .context("expected file stem to be a numeric value denoting the test"),
                 )?
                 .to_str()
-                .ok_or(
-                    anyhow!("file contains non-utf8 codepoints")
-                        .context("expected numeric values for each test"),
-                )?
+                .ok_or(anyhow!("file contains non-utf8 codepoints").context(
+                    "expected utf-8-compliant values for each test; each test should denote a \
+                    numeric value",
+                ))?
                 .parse::<usize>()
                 .context("expected file to denote a test number in the suite")?;
 
@@ -56,17 +60,19 @@ fn main() -> Result<()> {
 
     tests.sort_unstable_by_key(|&(_, test_num)| test_num);
 
-    let tests = tests.iter().try_fold(
-        (Vec::with_capacity(tests.len()), Test::default()),
-        |(mut tests, mut current_test), (test_path, test_num)| {
-            if current_test.num != *test_num {
-                tests.push(current_test);
+    let tests = tests
+        .iter()
+        .try_fold(
+            (Vec::with_capacity(tests.len()), Test::default()),
+            |(mut tests, mut current_test), (test_path, test_num)| {
+                if current_test.num != *test_num {
+                    tests.push(current_test);
 
-                current_test = Test::default();
-                current_test.num = *test_num;
-            }
+                    current_test = Test::default();
+                    current_test.num = *test_num;
+                }
 
-            match test_path
+                match test_path
                 .extension()
                 .ok_or(anyhow!("file doesn't contain extension").context(
                     "expected one of `rc`, `err`, `out`, `in` (and variations,) `desc`, `pre` or \
@@ -79,14 +85,22 @@ fn main() -> Result<()> {
                 b"err" => current_test.err = fs::read_to_string(test_path.canonicalize()?)?,
                 b"run" => current_test.run = fs::read_to_string(test_path.canonicalize()?)?,
                 b"desc" => current_test.desc = fs::read_to_string(test_path.canonicalize()?)?,
-                b"pre" => current_test.pre = fs::read_to_string(test_path.canonicalize()?)?,
-                b"post" => current_test.post = fs::read_to_string(test_path.canonicalize()?)?,
+                b"pre" => current_test.pre = Some(fs::read_to_string(test_path.canonicalize()?)?),
+                b"post" => current_test.post = Some(fs::read_to_string(test_path.canonicalize()?)?),
                 _ => (),
             }
 
-            Ok((tests, current_test))
-        },
-    )?;
+                Ok((tests, current_test))
+            },
+        )?
+        .0;
+
+    let install_result = Command::new("cargo")
+        .args(["install", "--root", ".", "--path", ".", "--locked"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .context("failed to invoke `cargo install` command to install binary")?;
 
     // 1. Execute the program in the current Cargo project.
     //    - Set up a virtual environment to install the program in the current
