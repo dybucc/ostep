@@ -1,8 +1,10 @@
 #![feature(exit_status_error)]
 
-use std::fs;
+use std::{env, fs};
 
 use anyhow::{Context, Ok, Result, anyhow};
+use cargo_metadata::MetadataCommand;
+use clap::Parser;
 
 #[derive(Debug)]
 struct Test {
@@ -31,7 +33,42 @@ impl Default for Test {
     }
 }
 
+// TODO: if value parsing is performed even in the absence of arguments, move
+// the logic from the start of `main()` to the `package_value_parser` function
+// instead.
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    about,
+    long_about = None,
+    next_line_help = true,
+    disable_help_flag = true,
+    disable_help_subcommand = true,
+    infer_long_args = true
+)]
+/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
+/// testing practices.)
+struct Args {
+    #[arg(short, long, default_value_t = String::new(), value_parser = package_value_parser)]
+    /// Specify the package to work on if we are in a workspace root and no
+    /// package could be determined.
+    package: String,
+}
+
+fn package_value_parser(input: &str) -> Result<String> {
+    todo!()
+}
+
 fn main() -> Result<()> {
+    let workspace_metadata = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .context("failed to parse cargo workspace/package")?;
+    let current_dir = env::current_dir();
+    let workspace_packages = workspace_metadata.workspace_packages();
+    if workspace_packages.len() > 1 {
+        let args = Args::parse();
+    }
     let mut tests = fs::read_dir("./tests")
         .context(
             "the `tests` directory should be present in the folder where you're running the \
@@ -61,7 +98,6 @@ fn main() -> Result<()> {
                         entry_path.display()
                     )
                 })?;
-
             if entry_metadata.is_file()
                 && matches!(
                     entry_extension.as_encoded_bytes(),
@@ -99,15 +135,12 @@ fn main() -> Result<()> {
                         )
                     })?;
                 let entry_extension = entry_extension.to_os_string();
-
                 accum.push((entry_path, entry_num, entry_extension));
             }
 
             Ok(accum)
         })?;
-
     tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-
     let tests = tests
         .iter()
         .try_fold(
@@ -115,7 +148,6 @@ fn main() -> Result<()> {
             |(mut tests, mut current_test), (test_path, test_num, test_extension)| {
                 if current_test.num != *test_num {
                     tests.push(current_test);
-
                     current_test = Test::default();
                     current_test.num = *test_num;
                 }
@@ -157,11 +189,13 @@ fn main() -> Result<()> {
 
     // 1. Query the directory with `cargo metadata`.
     // 2. Parse information from the Cargo project to check whether it's a
-    //    workspace or it's a regular package.
+    //    workspace, of if it's an individual package.
     //    3. If it's a regular package, then proceed as usual with the already
     //       implemented functionality.
     //    4. If it's a workspace, make sure the user passed in a command line
     //       argument that specifies the package that they want to test.
+    //       If it's a workspace member's directory that we are in, skip the
+    //       error about the `-p` flag not being issued.
     // 5. With the known location to the package, change this process' pwd to
     //    the package's manifest file (`Cargo.toml`) path.
     // 6. Proceed with the already implemented functionality for parsing entries
