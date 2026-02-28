@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.101"
-cargo_metadata = "0.23.1"
+# cargo_metadata = "0.23.1"
+cargo_metadata = { path = "/Users/dybucc/rust-dev/cargo_metadata" }
 clap = { version = "4.5.60", features = ["derive", "wrap_help"] }
 thiserror = "2.0.18"

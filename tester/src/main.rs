@@ -1,8 +1,11 @@
-#![feature(exit_status_error)]
+#![allow(unstable_features)]
 
-use std::{env, fs};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Ok, Result, anyhow};
+use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 
@@ -33,9 +36,8 @@ impl Default for Test {
     }
 }
 
-// TODO: if value parsing is performed even in the absence of arguments, move
-// the logic from the start of `main()` to the `package_value_parser` function
-// instead.
+/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
+/// testing practices.)
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -46,28 +48,37 @@ impl Default for Test {
     disable_help_subcommand = true,
     infer_long_args = true
 )]
-/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
-/// testing practices.)
 struct Args {
-    #[arg(short, long, default_value_t = String::new(), value_parser = package_value_parser)]
+    #[arg(short, long)]
     /// Specify the package to work on if we are in a workspace root and no
     /// package could be determined.
     package: String,
 }
 
-fn package_value_parser(input: &str) -> Result<String> {
-    todo!()
-}
-
 fn main() -> Result<()> {
     let workspace_metadata = MetadataCommand::new()
         .no_deps()
+        .other_options(["--format-version=1"])
         .exec()
-        .context("failed to parse cargo workspace/package")?;
-    let current_dir = env::current_dir();
+        .context("failed to query cargo workspace/package during initialization")?;
+    let current_dir = env::current_dir().context("failed to query pwd during initialization")?;
     let workspace_packages = workspace_metadata.workspace_packages();
-    if workspace_packages.len() > 1 {
-        let args = Args::parse();
+    if workspace_packages.len() > 1
+        && let Some(&pkg) = workspace_packages.iter().find(|&pkg| {
+            let path = pkg.manifest_path.as_std_path().parent().expect(
+                "`cargo metadata` specifies an absolute path by default and the `manifest_path` \
+                field is part of the stable commitment of `format-version=1`; hopefully you're not \
+                running `tester` from `/`",
+            );
+
+            path == current_dir
+        })
+    {
+        let cmd_pkg = Args::parse().package;
+        if pkg.name == cmd_pkg {
+            env::set_current_dir(Path::new(&pkg.manifest_path))
+                .context("failed to cwd to the issued package's directory")?;
+        }
     }
     let mut tests = fs::read_dir("./tests")
         .context(
@@ -157,13 +168,13 @@ fn main() -> Result<()> {
                         Some(
                             fs::read_to_string($test.canonicalize().with_context(|| {
                                 format!(
-                                    "failed when parsing `tests` directory entry `{}`",
+                                    "failed while parsing `tests` directory entry `{}`",
                                     test_path.display()
                                 )
                             })?)
                             .with_context(|| {
                                 format!(
-                                    "failed when parsing `tests` directory entry `{}`",
+                                    "failed while parsing `tests` directory entry `{}`",
                                     test_path.display()
                                 )
                             })?,
