@@ -1,5 +1,5 @@
 [toolchain]
-channel = "stable"
+channel = "nightly"
 profile = "minimal"
 components = [
   "rustc",

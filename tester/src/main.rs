@@ -1,13 +1,15 @@
-#![allow(unstable_features)]
+#![feature(exit_status_error)]
 
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    ops::ControlFlow,
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
+use serde_json::Value;
 
 #[derive(Debug)]
 struct Test {
@@ -43,16 +45,14 @@ impl Default for Test {
     version,
     about,
     long_about = None,
-    next_line_help = true,
     disable_help_flag = true,
     disable_help_subcommand = true,
     infer_long_args = true
 )]
 struct Args {
     #[arg(short, long)]
-    /// Specify the package to work on if we are in a workspace root and no
-    /// package could be determined.
-    package: String,
+    /// Specify the package to work on in a workspace.
+    package: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -61,25 +61,53 @@ fn main() -> Result<()> {
         .other_options(["--format-version=1"])
         .exec()
         .context("failed to query cargo workspace/package during initialization")?;
-    let current_dir = env::current_dir().context("failed to query pwd during initialization")?;
     let workspace_packages = workspace_metadata.workspace_packages();
-    if workspace_packages.len() > 1
-        && let Some(&pkg) = workspace_packages.iter().find(|&pkg| {
-            let path = pkg.manifest_path.as_std_path().parent().expect(
-                "`cargo metadata` specifies an absolute path by default and the `manifest_path` \
-                field is part of the stable commitment of `format-version=1`; hopefully you're not \
-                running `tester` from `/`",
-            );
+    let target_pkg = match workspace_packages.len() {
+        2.. => {
+            let pwd = env::current_dir().context("failed to fetch pwd during initialization")?;
+            let arg_pkg_name = Args::parse().package;
 
-            path == current_dir
-        })
-    {
-        let cmd_pkg = Args::parse().package;
-        if pkg.name == cmd_pkg {
-            env::set_current_dir(Path::new(&pkg.manifest_path))
-                .context("failed to cwd to the issued package's directory")?;
+            if let ControlFlow::Break(pkg) =
+                workspace_packages
+                    .iter()
+                    .try_fold(None, |_: Option<()>, pkg| {
+                        if pkg.manifest_path == pwd {
+                            return ControlFlow::Break(pkg);
+                        }
+                        if let Some(name) = &arg_pkg_name
+                            && pkg.name == name
+                        {
+                            return ControlFlow::Break(pkg);
+                        }
+
+                        ControlFlow::Continue(None)
+                    })
+            {
+                env::set_current_dir(pkg.manifest_path.as_std_path())
+                    .context("failed to set pwd during initialization")
+                    .with_context(|| {
+                        format!(
+                            "failed to set pwd to pkg manifest path: {}",
+                            pkg.manifest_path
+                        )
+                    })?;
+
+                pkg.name.as_ref()
+            } else {
+                bail!(
+                    "cargo workspace package directory doesn't match pwd and no `-p` package \
+                    option was provided"
+                );
+            }
         }
-    }
+        1 => {
+            let target_pkg = workspace_packages.first().unwrap();
+            env::set_current_dir(target_pkg.manifest_path.as_std_path()).context("")?;
+
+            target_pkg.name.as_ref()
+        }
+        _ => bail!("cargo workspace doesn't contain any packages"),
+    };
     let mut tests = fs::read_dir("./tests")
         .context(
             "the `tests` directory should be present in the folder where you're running the \
@@ -97,19 +125,8 @@ fn main() -> Result<()> {
                     entry_path.display()
                 )
             })?;
-            let entry_extension = entry_path
-                .extension()
-                .ok_or(anyhow!(
-                    "failed to fetch file extension for `tests` file entry"
-                ))
-                .with_context(|| {
-                    format!(
-                        "failed to fetch fs entry extensions when parsing `tests` directory \
-                            entry: `{}`",
-                        entry_path.display()
-                    )
-                })?;
             if entry_metadata.is_file()
+                && let Some(entry_extension) = entry_path.extension()
                 && matches!(
                     entry_extension.as_encoded_bytes(),
                     b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
@@ -197,6 +214,34 @@ fn main() -> Result<()> {
             },
         )?
         .0;
+    let build_cmd = Command::new("cargo")
+        .args(["--release", "--message-format=json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to spawn `cargo-build` on pwd")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?
+        .exit_ok()
+        .context("package compilation through `cargo-build` failed")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?;
+    let parsed_json: Value = serde_json::from_slice(&build_cmd.stdout)
+        .context("failed to parse json output from `cargo-build`")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?;
 
     // 1. Query the directory with `cargo metadata`.
     // 2. Parse information from the Cargo project to check whether it's a

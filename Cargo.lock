@@ -312,6 +312,8 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

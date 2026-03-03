@@ -1,0 +1,36 @@
+{
+  "reason": "compiler-artifact",
+  "package_id": "path+file:///Users/dybucc/rust-dev/ostep/initial-utilities/wcat#0.1.0",
+  "manifest_path": "/Users/dybucc/rust-dev/ostep/initial-utilities/wcat/Cargo.toml",
+  "target": {
+    "kind": [
+      "bin"
+    ],
+    "crate_types": [
+      "bin"
+    ],
+    "name": "wcat",
+    "src_path": "/Users/dybucc/rust-dev/ostep/initial-utilities/wcat/src/main.rs",
+    "edition": "2024",
+    "doc": true,
+    "doctest": false,
+    "test": true
+  },
+  "profile": {
+    "opt_level": "3",
+    "debuginfo": 0,
+    "debug_assertions": false,
+    "overflow_checks": false,
+    "test": false
+  },
+  "features": [],
+  "filenames": [
+    "/Users/dybucc/rust-dev/ostep/target/release/wcat"
+  ],
+  "executable": "/Users/dybucc/rust-dev/ostep/target/release/wcat",
+  "fresh": true
+}
+{
+  "reason": "build-finished",
+  "success": true
+}
