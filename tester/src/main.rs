@@ -1,10 +1,6 @@
-#![feature(exit_status_error)]
+#![feature(exit_status_error, string_from_utf8_lossy_owned)]
 
-use std::{
-    env, fs,
-    ops::ControlFlow,
-    process::{Command, Stdio},
-};
+use std::{env, ffi::OsString, fs, ops::ControlFlow, path::PathBuf, process::Command};
 
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
@@ -56,13 +52,82 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    let target_pkg = find_pkg()?;
+    let mut tests = find_tests()?;
+    tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
+    let tests = produce_tests(tests);
+    let build_cmd = Command::new("cargo")
+        .args(["--release", "--message-format=json"])
+        .output()
+        .context("failed to spawn `cargo-build` on pwd")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?
+        .exit_ok()
+        .context("package compilation through `cargo-build` failed")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?;
+    let parsed_json = parse_build_json(
+        serde_json::from_str(&preprocess_build_json(build_cmd.stdout))
+            .context("failed to parse json output from `cargo-build`")
+            .with_context(|| {
+                format!(
+                    "failed while trying to build binary for cargo workspace package: {}",
+                    target_pkg
+                )
+            })?,
+    )
+    .ok_or(anyhow!(
+        "failed to find `executable` entry in cargo build json output"
+    ))
+    .with_context(|| {
+        format!(
+            "failed while trying to build binary for cargo workspace package: {}",
+            target_pkg
+        )
+    })?;
+
+    // 1. Query the directory with `cargo metadata`.
+    // 2. Parse information from the Cargo project to check whether it's a
+    //    workspace, of if it's an individual package.
+    //    3. If it's a regular package, then proceed as usual with the already
+    //       implemented functionality.
+    //    4. If it's a workspace, make sure the user passed in a command line
+    //       argument that specifies the package that they want to test.
+    //       If it's a workspace member's directory that we are in, skip the
+    //       error about the `-p` flag not being issued.
+    // 5. With the known location to the package, change this process' pwd to
+    //    the package's manifest file (`Cargo.toml`) path.
+    // 6. Proceed with the already implemented functionality for parsing entries
+    //    of the `./tests` directory in the pwd of this process.
+    // 7. Run `cargo build --release --message-format=json`, and parse the
+    //    path of the resulting binary under the key `executable`.
+    // 8. Copy over the executable parsed to the process' pwd.
+    // 9. For each test:
+    //    10. Run the same command as indicated in the `.rc` file.
+    //    11. Check the exit status matches the contents of the `.rc` file.
+    //    12. Check the stdout matches the contents of the `.out` file.
+    //    13. Check the stderr matches the contents of the `.err` file.
+
+    Ok(())
+}
+
+fn find_pkg() -> Result<String> {
     let workspace_metadata = MetadataCommand::new()
         .no_deps()
         .other_options(["--format-version=1"])
         .exec()
         .context("failed to query cargo workspace/package during initialization")?;
     let workspace_packages = workspace_metadata.workspace_packages();
-    let target_pkg = match workspace_packages.len() {
+
+    Ok(match workspace_packages.len() {
         2.. => {
             let pwd = env::current_dir().context("failed to fetch pwd during initialization")?;
             let arg_pkg_name = Args::parse().package;
@@ -83,7 +148,7 @@ fn main() -> Result<()> {
                         ControlFlow::Continue(None)
                     })
             {
-                env::set_current_dir(pkg.manifest_path.as_std_path())
+                env::set_current_dir(&pkg.manifest_path)
                     .context("failed to set pwd during initialization")
                     .with_context(|| {
                         format!(
@@ -92,7 +157,7 @@ fn main() -> Result<()> {
                         )
                     })?;
 
-                pkg.name.as_ref()
+                pkg.name.to_string()
             } else {
                 bail!(
                     "cargo workspace package directory doesn't match pwd and no `-p` package \
@@ -102,13 +167,23 @@ fn main() -> Result<()> {
         }
         1 => {
             let target_pkg = workspace_packages.first().unwrap();
-            env::set_current_dir(target_pkg.manifest_path.as_std_path()).context("")?;
+            env::set_current_dir(&target_pkg.manifest_path)
+                .context("failed to set pwd during initialization")
+                .with_context(|| {
+                    format!(
+                        "failed to set pwd to cargo package directory: {}",
+                        target_pkg.manifest_path
+                    )
+                })?;
 
-            target_pkg.name.as_ref()
+            target_pkg.name.to_string()
         }
         _ => bail!("cargo workspace doesn't contain any packages"),
-    };
-    let mut tests = fs::read_dir("./tests")
+    })
+}
+
+fn find_tests() -> Result<Vec<(PathBuf, usize, OsString)>> {
+    fs::read_dir("./tests")
         .context(
             "the `tests` directory should be present in the folder where you're running the \
             program",
@@ -167,9 +242,11 @@ fn main() -> Result<()> {
             }
 
             Ok(accum)
-        })?;
-    tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-    let tests = tests
+        })
+}
+
+fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> Result<Vec<Test>> {
+    Ok(tests
         .iter()
         .try_fold(
             (Vec::with_capacity(tests.len()), Test::default()),
@@ -213,57 +290,34 @@ fn main() -> Result<()> {
                 Ok((tests, current_test))
             },
         )?
-        .0;
-    let build_cmd = Command::new("cargo")
-        .args(["--release", "--message-format=json"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("failed to spawn `cargo-build` on pwd")
-        .with_context(|| {
-            format!(
-                "failed while trying to build binary for cargo workspace package: {}",
-                target_pkg
-            )
-        })?
-        .exit_ok()
-        .context("package compilation through `cargo-build` failed")
-        .with_context(|| {
-            format!(
-                "failed while trying to build binary for cargo workspace package: {}",
-                target_pkg
-            )
-        })?;
-    let parsed_json: Value = serde_json::from_slice(&build_cmd.stdout)
-        .context("failed to parse json output from `cargo-build`")
-        .with_context(|| {
-            format!(
-                "failed while trying to build binary for cargo workspace package: {}",
-                target_pkg
-            )
-        })?;
+        .0)
+}
 
-    // 1. Query the directory with `cargo metadata`.
-    // 2. Parse information from the Cargo project to check whether it's a
-    //    workspace, of if it's an individual package.
-    //    3. If it's a regular package, then proceed as usual with the already
-    //       implemented functionality.
-    //    4. If it's a workspace, make sure the user passed in a command line
-    //       argument that specifies the package that they want to test.
-    //       If it's a workspace member's directory that we are in, skip the
-    //       error about the `-p` flag not being issued.
-    // 5. With the known location to the package, change this process' pwd to
-    //    the package's manifest file (`Cargo.toml`) path.
-    // 6. Proceed with the already implemented functionality for parsing entries
-    //    of the `./tests` directory in the pwd of this process.
-    // 7. Run `cargo build --release --message-format=json`, and parse the
-    //    path of the resulting binary under the key `executable`.
-    // 8. Copy over the executable parsed to the process' pwd.
-    // 9. For each test:
-    //    10. Run the same command as indicated in the `.rc` file.
-    //    11. Check the exit status matches the contents of the `.rc` file.
-    //    12. Check the stdout matches the contents of the `.out` file.
-    //    13. Check the stderr matches the contents of the `.err` file.
+fn preprocess_build_json(input: Vec<u8>) -> String {
+    let mut output = String::from_utf8_lossy_owned(input);
+    let mut stopper = output.len();
+    let mut char_counter = 0;
+    for line in output.lines() {
+        if line == "}" {
+            stopper = char_counter + 1;
+            break;
+        }
+        // +1 to account for the line terminators that `lines()` munches.
+        char_counter += line.len() + 1;
+    }
+    output.truncate(stopper);
 
-    Ok(())
+    output
+}
+
+fn parse_build_json(input: Value) -> Option<PathBuf> {
+    if let Value::Object(map) = input {
+        if let Some(Value::String(s)) = map.get("executable") {
+            Some(PathBuf::from(s))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
