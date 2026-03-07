@@ -1,6 +1,16 @@
 #![feature(exit_status_error, string_from_utf8_lossy_owned)]
 
-use std::{env, ffi::OsString, fs, ops::ControlFlow, path::PathBuf, process::Command};
+use std::{
+    borrow::Cow,
+    env,
+    ffi::{OsStr, OsString},
+    fmt::Display,
+    fs,
+    ops::ControlFlow,
+    os::unix::process::ExitStatusExt,
+    path::PathBuf,
+    process::{Command, ExitStatus},
+};
 
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
@@ -34,8 +44,6 @@ impl Default for Test {
     }
 }
 
-/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
-/// testing practices.)
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -45,6 +53,8 @@ impl Default for Test {
     disable_help_subcommand = true,
     infer_long_args = true
 )]
+/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
+/// testing practices.)
 struct Args {
     #[arg(short, long)]
     /// Specify the package to work on in a workspace.
@@ -52,47 +62,10 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    let target_pkg = find_pkg()?;
-    let mut tests = find_tests()?;
+    let (target_pkg, mut tests) = (find_pkg()?, find_tests()?);
     tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-    let tests = produce_tests(tests);
-    let build_cmd = Command::new("cargo")
-        .args(["--release", "--message-format=json"])
-        .output()
-        .context("failed to spawn `cargo-build` on pwd")
-        .with_context(|| {
-            format!(
-                "failed while trying to build binary for cargo workspace package: {}",
-                target_pkg
-            )
-        })?
-        .exit_ok()
-        .context("package compilation through `cargo-build` failed")
-        .with_context(|| {
-            format!(
-                "failed while trying to build binary for cargo workspace package: {}",
-                target_pkg
-            )
-        })?;
-    let parsed_json = parse_build_json(
-        serde_json::from_str(&preprocess_build_json(build_cmd.stdout))
-            .context("failed to parse json output from `cargo-build`")
-            .with_context(|| {
-                format!(
-                    "failed while trying to build binary for cargo workspace package: {}",
-                    target_pkg
-                )
-            })?,
-    )
-    .ok_or(anyhow!(
-        "failed to find `executable` entry in cargo build json output"
-    ))
-    .with_context(|| {
-        format!(
-            "failed while trying to build binary for cargo workspace package: {}",
-            target_pkg
-        )
-    })?;
+    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(tests)?);
+    let results = run_tests(exe, tests, &target_pkg)?;
 
     // 1. Query the directory with `cargo metadata`.
     // 2. Parse information from the Cargo project to check whether it's a
@@ -108,10 +81,10 @@ fn main() -> Result<()> {
     // 6. Proceed with the already implemented functionality for parsing entries
     //    of the `./tests` directory in the pwd of this process.
     // 7. Run `cargo build --release --message-format=json`, and parse the
-    //    path of the resulting binary under the key `executable`.
+    //    path of the resulting binary under key `executable`.
     // 8. Copy over the executable parsed to the process' pwd.
     // 9. For each test:
-    //    10. Run the same command as indicated in the `.rc` file.
+    //    10. Run the same command as indicated in the `.run` file.
     //    11. Check the exit status matches the contents of the `.rc` file.
     //    12. Check the stdout matches the contents of the `.out` file.
     //    13. Check the stderr matches the contents of the `.err` file.
@@ -178,7 +151,7 @@ fn find_pkg() -> Result<String> {
 
             target_pkg.name.to_string()
         }
-        _ => bail!("cargo workspace doesn't contain any packages"),
+        _ => bail!("no packages found"),
     })
 }
 
@@ -284,7 +257,7 @@ fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> Result<Vec<Test>> {
                     b"desc" => current_test.desc = check_entry!(test_path),
                     b"pre" => current_test.pre = check_entry!(test_path),
                     b"post" => current_test.post = check_entry!(test_path),
-                    _ => (),
+                    _ => unreachable!("all file extensions have been filtered past `find_tests()`"),
                 }
 
                 Ok((tests, current_test))
@@ -320,4 +293,116 @@ fn parse_build_json(input: Value) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
+    let exe = parse_build_json(
+        serde_json::from_str(&preprocess_build_json(
+            Command::new("cargo")
+                .args(["--release", "--message-format=json"])
+                .output()
+                .context("failed to spawn `cargo-build` on pwd")
+                .with_context(|| {
+                    format!(
+                        "failed while trying to build binary for cargo workspace package: {}",
+                        target_pkg
+                    )
+                })?
+                .exit_ok()
+                .context("package compilation through `cargo-build` failed")
+                .with_context(|| {
+                    format!(
+                        "failed while trying to build binary for cargo workspace package: {}",
+                        target_pkg
+                    )
+                })?
+                .stdout,
+        ))
+        .context("failed to parse json output from `cargo-build`")
+        .with_context(|| {
+            format!(
+                "failed while trying to build binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?,
+    )
+    .ok_or(anyhow!(
+        "failed to find `executable` entry in cargo build json output"
+    ))
+    .with_context(|| {
+        format!(
+            "failed while trying to build binary for cargo workspace package: {}",
+            target_pkg
+        )
+    })?;
+    Command::new("cp")
+        .args([exe.as_os_str(), OsStr::new(".")])
+        .status()
+        .context("failed to copy binary executable to pwd")
+        .with_context(|| {
+            format!(
+                "failed while managing binary for cargo workspace package: {}",
+                target_pkg
+            )
+        })?;
+
+    Ok(Cow::into_owned(
+        exe.file_name()
+            .expect(
+                "owing to `cargo`'s stable formatting guarantees, if the program hasn't already \
+                thrown an error because of the lack of the `executable` key in the generated build \
+                json, then surely it has produced a file path with the last component being the \
+                name of the executable",
+            )
+            .to_string_lossy(),
+    ))
+}
+
+fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Result<()> {
+    tests
+        .into_iter()
+        .try_fold(
+            (),
+            |(),
+             Test {
+                 num,
+                 out,
+                 err,
+                 rc,
+                 run,
+                 desc,
+                 ..
+             }| {
+                // Chanage the below constant if you ever start parsing more
+                // info from the `Test` structure.
+                const TEST_PARAMS: usize = 5;
+                let [out, err, rc, run, desc] = [out, err, rc, run, desc]
+                    .into_iter()
+                    .enumerate()
+                    .try_fold(
+                        [const { String::new() }; TEST_PARAMS],
+                        |mut accum, (idx, param)| {
+                            accum[idx] = param?;
+
+                            Some(accum)
+                        },
+                    )
+                    .ok_or(anyhow!(""))?;
+                let mut program_params = run.split_ascii_whitespace();
+                let run_program = program_params.next().ok_or(anyhow!(""))?;
+                let output = Command::new(run_program).args(program_params).output()?;
+                if output.status == <ExitStatus as ExitStatusExt>::from_raw(rc.parse::<i32>()?) {
+                    todo!()
+                } else if String::from_utf8_lossy_owned(output.stdout) == out {
+                    todo!()
+                } else if String::from_utf8_lossy_owned(output.stderr) == err {
+                    todo!()
+                }
+
+                Ok(())
+            },
+        )
+        .context("")?;
+
+    Ok(())
 }
