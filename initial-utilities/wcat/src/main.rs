@@ -7,10 +7,10 @@ fn main() -> ExitCode {
 
         Ok::<_, Error>(())
     }) {
-        Ok(_) => ExitCode::SUCCESS,
-        Err(_) => {
+        | Ok(_) => ExitCode::SUCCESS,
+        | Err(_) => {
             eprintln!("wcat: cannot open file");
             ExitCode::FAILURE
-        }
+        },
     }
 }
