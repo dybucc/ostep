@@ -260,6 +260,7 @@ fn preprocess_build_json(input: Vec<u8>) -> String {
         char_counter += line.len() + 1;
     }
     output.truncate(stopper);
+    eprintln!("truncated json: {output}");
 
     output
 }
