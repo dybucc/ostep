@@ -248,19 +248,16 @@ fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> Result<Vec<Test>> {
 }
 
 fn preprocess_build_json(input: Vec<u8>) -> String {
-    let mut output = String::from_utf8_lossy_owned(input);
-    let mut stopper = output.len();
-    let mut char_counter = 0;
-    for line in output.lines() {
-        if line == "}" {
-            stopper = char_counter + 1;
-            break;
+    let mut output = String::with_capacity(input.len());
+    for b in input {
+        if b != b'\n' {
+            output.push(char::from(b));
+            continue;
         }
-        // +1 to account for the line terminators that `lines()` munches.
-        char_counter += line.len() + 1;
+        break;
     }
-    output.truncate(stopper);
-    eprintln!("truncated json: {output}");
+    #[cfg(debug_assertions)]
+    eprintln!("{output}");
 
     output
 }
@@ -280,8 +277,8 @@ fn parse_build_json(input: Value) -> Option<PathBuf> {
 fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
     let exe =
         parse_build_json(
-            serde_json::from_str(&preprocess_build_json(
-                Command::new("cargo")
+            serde_json::from_str(&preprocess_build_json({
+                let input = Command::new("cargo")
                     .args(["build", "--release", "--message-format=json"])
                     .output()
                     .context("failed to spawn `cargo-build` on pwd")
@@ -299,8 +296,12 @@ fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
                              {target_pkg}",
                         )
                     })?
-                    .stdout,
-            ))
+                    .stdout;
+                #[cfg(debug_assertions)]
+                eprintln!("{}", String::from_utf8_lossy_owned(input.clone()));
+
+                input
+            }))
             .context("failed to parse json output from `cargo-build`")
             .with_context(|| {
                 format!(
@@ -350,8 +351,8 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Resul
                     | 4 => anyhow!("failed to find `desc` test param"),
                     | _ => unimplemented!(
                         "if you hit this case, you most likely are considering more test \
-                             parameters and should probably reevaluate the whole match arm and its \
-                             surroundings"
+                         parameters and should probably reevaluate the whole match arm and its \
+                         surroundings"
                     ),
                 })?;
 
@@ -360,6 +361,8 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Resul
             .with_context(|| {
                 format!("failed while parsing test entry {num} for pkg: {target_pkg}")
             })?;
+        #[cfg(debug_assertions)]
+        eprintln!("pkg entry: {num}\nout: {out}\nerr: {err}\nrc: {rc}\nrun: {run}\ndesc: {desc}");
         let mut program_params = run.split_ascii_whitespace();
         let bin = program_params
             .next()
@@ -372,10 +375,11 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Resul
             .with_context(|| {
                 format!("crate binary: {exe}, binary name in `.run` test file param: {bin}")
             })?;
-        println!("running test entry {num} for pkg {target_pkg}:\n{desc}");
+        print!("running test entry {num} for pkg {target_pkg}:\n{desc}");
         let output = Command::new(bin).args(program_params).output()?;
         let status = <ExitStatus as ExitStatusExt>::from_raw(
-            rc.parse::<i32>()
+            rc.trim()
+                .parse::<i32>()
                 .context("failed to parse return code in `.rc` test file param")
                 .with_context(|| {
                     format!("failed while parsing test entry {num} for pkg: {target_pkg}")
@@ -388,16 +392,17 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Resul
         );
         if status != real_status {
             return Err(anyhow!("test exit status doesn't match expected exit status"))
-                .with_context(|| format!("test exit status: {}\nexpected: {status}", real_status));
+                .with_context(|| format!("\ntest exit status: {real_status}\nexpected: {status}"));
         }
         if out != real_out {
             return Err(anyhow!("test stdout doesn't match expected stdout"))
-                .with_context(|| format!("test stdout:\n{}\nexpected:\n{out}", real_out));
+                .with_context(|| format!("\ntest stdout:\n{real_out}\nexpected:\n{out}"));
         }
         if err != real_err {
             return Err(anyhow!("test stderr doesn't match expected stderr"))
-                .with_context(|| format!("test stderr:\n{}\nexpected:\n{err}", real_err));
+                .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"));
         }
+        println!("sucess\n---");
 
         Ok(())
     })?;
