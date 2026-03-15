@@ -3,12 +3,17 @@ name = "tester"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1.0.101"
 # cargo_metadata = "0.23.1"
 cargo_metadata = { path = "/Users/dybucc/rust-dev/cargo_metadata" }
 clap = { version = "4.5.60", features = ["derive", "wrap_help"] }
+futures = "0.3.32"
 itertools = "0.14.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
+tokio = "1.50.0"

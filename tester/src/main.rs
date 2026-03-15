@@ -7,9 +7,8 @@ use std::{
     fmt::Display,
     fs,
     ops::ControlFlow,
-    os::unix::process::ExitStatusExt,
     path::PathBuf,
-    process::{Command, ExitStatus},
+    process::Command,
 };
 
 use anyhow::{Context, Ok, Result, anyhow, bail};
@@ -64,7 +63,7 @@ struct Args {
 fn main() -> Result<()> {
     let (target_pkg, mut tests) = (find_pkg()?, find_tests()?);
     tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(tests)?);
+    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
     run_tests(exe, tests, &target_pkg)
 }
@@ -198,7 +197,7 @@ fn find_tests() -> Result<Vec<(PathBuf, usize, OsString)>> {
         })
 }
 
-fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> Result<Vec<Test>> {
+fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> Result<Vec<Test>> {
     Ok(tests
         .iter()
         .try_fold(
@@ -212,17 +211,19 @@ fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> Result<Vec<Test>> {
 
                 macro_rules! check_entry {
                     ($test:expr) => {{
+                        let printable_path = test_path.display();
+
                         Some(
                             fs::read_to_string($test.canonicalize().with_context(|| {
                                 format!(
                                     "failed while parsing `tests` directory entry `{}`",
-                                    test_path.display()
+                                    printable_path
                                 )
                             })?)
                             .with_context(|| {
                                 format!(
                                     "failed while parsing `tests` directory entry `{}`",
-                                    test_path.display()
+                                    printable_path
                                 )
                             })?,
                         )
@@ -263,12 +264,10 @@ fn preprocess_build_json(input: Vec<u8>) -> String {
 }
 
 fn parse_build_json(input: Value) -> Option<PathBuf> {
-    if let Value::Object(map) = input {
-        if let Some(Value::String(s)) = map.get("executable") {
-            Some(PathBuf::from(s))
-        } else {
-            None
-        }
+    if let Value::Object(map) = input
+        && let Some(Value::String(s)) = map.get("executable")
+    {
+        Some(PathBuf::from(s))
     } else {
         None
     }
@@ -334,9 +333,9 @@ fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
 }
 
 fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Result<()> {
-    tests.into_iter().try_fold((), |_, Test { num, out, err, rc, run, desc, .. }| {
-        // Chanage the below constant if you ever start parsing more info
-        // from the `Test` structure.
+    tests.into_iter().try_for_each(|Test { num, out, err, rc, run, desc, .. }| {
+        // Chanage the below constant if you ever start parsing more info from
+        // the `Test` structure.
         const TEST_PARAMS: usize = 5;
 
         let [out, err, rc, run, desc] = [out, err, rc, run, desc]
@@ -377,36 +376,53 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> Resul
             })?;
         print!("running test entry {num} for pkg {target_pkg}:\n{desc}");
         let output = Command::new(bin).args(program_params).output()?;
-        let status = <ExitStatus as ExitStatusExt>::from_raw(
-            rc.trim()
-                .parse::<i32>()
-                .context("failed to parse return code in `.rc` test file param")
+        let status = rc
+            .trim()
+            .parse::<i32>()
+            .context("failed to parse return code in `.rc` test file param")
+            .with_context(|| {
+                format!("failed while parsing test entry {num} for pkg: {target_pkg}")
+            })?;
+        let (real_status, real_out, real_err) = (
+            output
+                .status
+                .code()
+                .ok_or_else(|| {
+                    anyhow!("failed to parse wait status of tested binary program as exit code")
+                })
                 .with_context(|| {
                     format!("failed while parsing test entry {num} for pkg: {target_pkg}")
                 })?,
-        );
-        let (real_status, real_out, real_err) = (
-            output.status,
             String::from_utf8_lossy_owned(output.stdout),
             String::from_utf8_lossy_owned(output.stderr),
         );
-        if status != real_status {
-            return Err(anyhow!("test exit status doesn't match expected exit status"))
-                .with_context(|| format!("\ntest exit status: {real_status}\nexpected: {status}"));
-        }
-        if out != real_out {
-            return Err(anyhow!("test stdout doesn't match expected stdout"))
-                .with_context(|| format!("\ntest stdout:\n{real_out}\nexpected:\n{out}"));
-        }
-        if err != real_err {
-            return Err(anyhow!("test stderr doesn't match expected stderr"))
-                .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"));
-        }
+        (status == real_status)
+            .ok_or(anyhow!("test exit status doesn't match expected exit status"))
+            .with_context(|| format!("\ntest exit status: {real_status}\nexpected: {status}"))?;
+        (out == real_out)
+            .ok_or(anyhow!("test stdout doesn't match expected stdout"))
+            .with_context(|| format!("\ntest stdout:\n{real_out}\nexpected:\n{out}"))?;
+        (err == real_err)
+            .ok_or(anyhow!("test stderr doesn't match expected stderr"))
+            .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"))?;
         println!("sucess\n---");
 
         Ok(())
     })?;
     println!("all tests passed");
+    cleanup(exe)?;
+
+    Ok(())
+}
+
+fn cleanup(mut exe: String) -> Result<()> {
+    exe.insert_str(0, "./");
+    Command::new("rm")
+        .arg(exe)
+        .status()
+        .context("failed to invoke clean up command")?
+        .exit_ok()
+        .context("failed to clean up resources")?;
 
     Ok(())
 }
