@@ -4,3 +4,9 @@ members = ["initial-utilities/wcat", "tester"]
 
 [workspace.lints.clippy]
 pedantic = "warn"
+
+[profile.release]
+strip = true
+lto = true
+panic = "unwind"
+codegen-units = 1

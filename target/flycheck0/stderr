@@ -1,5 +1,13 @@
-   0.021975833s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="tester"}: cargo::core::compiler::fingerprint: fingerprint error for tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester)/Check { test: false }/TargetInner { name: "tester", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/tester/src/main.rs", Edition2024) }
-   0.021993875s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="tester"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/tester-fde665f91541eb9c/bin-tester`
+   0.048505416s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744695.888388641s > 1773735752.224847528s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.101"
+   0.048596166s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744695.892741029s > 1773735752.078724312s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.228"
+   0.048601833s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744695.978616331s > 1773735752.803364369s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/camino-1.2.2"
+   0.048829708s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `serde_derive` is newer than we are 1773744697.684364403s > 1773735752.803502369s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228"
+   0.049401500s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744695.885763492s > 1773735752.162621654s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zmij-1.0.21"
+   0.049473875s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744696.022484413s > 1773735752.192940510s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18"
+   0.051228291s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `build_script_build` is newer than we are 1773744695.937336690s > 1773735752.078743812s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.182"
+   0.052684166s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: dependency on `futures_macro` is newer than we are 1773744697.152306080s > 1773735752.299668109s "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-util-0.3.32"
+   0.053581750s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: fingerprint error for tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester)/Check { test: false }/TargetInner { name: "ostep-tester", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/tester/src/main.rs", Edition2024) }
+   0.053868083s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/tester-363ee4c0a24a222e/bin-ostep-tester`
 
 Caused by:
     No such file or directory (os error 2)
@@ -22,8 +30,90 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
-   0.027386666s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="tester"}: cargo::core::compiler::fingerprint: fingerprint error for tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester)/Check { test: true }/TargetInner { name: "tester", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/tester/src/main.rs", Edition2024) }
-   0.027392458s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="tester"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/tester-42f0b826f6fca72a/test-bin-tester`
+   0.067220625s  INFO prepare_target{force=false package_id=anyhow v1.0.101 target="anyhow"}: cargo::core::compiler::fingerprint: fingerprint dirty for anyhow v1.0.101/Check { test: false }/TargetInner { ..: lib_target("anyhow", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.101/src/lib.rs", Edition2021) }
+   0.067235791s  INFO prepare_target{force=false package_id=anyhow v1.0.101 target="anyhow"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.067735750s  INFO prepare_target{force=false package_id=cargo_metadata v0.23.1 (/Users/dybucc/rust-dev/cargo_metadata) target="cargo_metadata"}: cargo::core::compiler::fingerprint: fingerprint dirty for cargo_metadata v0.23.1 (/Users/dybucc/rust-dev/cargo_metadata)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("cargo_metadata", ["lib"], "/Users/dybucc/rust-dev/cargo_metadata/src/lib.rs", Edition2021) }
+   0.067739041s  INFO prepare_target{force=false package_id=cargo_metadata v0.23.1 (/Users/dybucc/rust-dev/cargo_metadata) target="cargo_metadata"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.068089875s  INFO prepare_target{force=false package_id=camino v1.2.2 target="camino"}: cargo::core::compiler::fingerprint: fingerprint dirty for camino v1.2.2/Check { test: false }/TargetInner { ..: lib_target("camino", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/camino-1.2.2/src/lib.rs", Edition2021) }
+   0.068092333s  INFO prepare_target{force=false package_id=camino v1.2.2 target="camino"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.069905583s  INFO prepare_target{force=false package_id=serde_core v1.0.228 target="serde_core"}: cargo::core::compiler::fingerprint: fingerprint dirty for serde_core v1.0.228/Check { test: false }/TargetInner { ..: lib_target("serde_core", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.228/src/lib.rs", Edition2021) }
+   0.069909833s  INFO prepare_target{force=false package_id=serde_core v1.0.228 target="serde_core"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.070130916s  INFO prepare_target{force=false package_id=cargo-platform v0.3.2 target="cargo_platform"}: cargo::core::compiler::fingerprint: fingerprint dirty for cargo-platform v0.3.2/Check { test: false }/TargetInner { ..: lib_target("cargo_platform", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cargo-platform-0.3.2/src/lib.rs", Edition2024) }
+   0.070134833s  INFO prepare_target{force=false package_id=cargo-platform v0.3.2 target="cargo_platform"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.070260333s  INFO prepare_target{force=false package_id=semver v1.0.27 target="semver"}: cargo::core::compiler::fingerprint: fingerprint dirty for semver v1.0.27/Check { test: false }/TargetInner { ..: lib_target("semver", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/lib.rs", Edition2018) }
+   0.070263250s  INFO prepare_target{force=false package_id=semver v1.0.27 target="semver"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.070385875s  INFO prepare_target{force=false package_id=serde v1.0.228 target="serde"}: cargo::core::compiler::fingerprint: fingerprint dirty for serde v1.0.228/Check { test: false }/TargetInner { ..: lib_target("serde", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs", Edition2021) }
+   0.070388583s  INFO prepare_target{force=false package_id=serde v1.0.228 target="serde"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.071022333s  INFO prepare_target{force=false package_id=serde_json v1.0.149 target="serde_json"}: cargo::core::compiler::fingerprint: fingerprint dirty for serde_json v1.0.149/Check { test: false }/TargetInner { ..: lib_target("serde_json", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.149/src/lib.rs", Edition2021) }
+   0.071025708s  INFO prepare_target{force=false package_id=serde_json v1.0.149 target="serde_json"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.071326875s  INFO prepare_target{force=false package_id=itoa v1.0.17 target="itoa"}: cargo::core::compiler::fingerprint: fingerprint dirty for itoa v1.0.17/Check { test: false }/TargetInner { ..: lib_target("itoa", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itoa-1.0.17/src/lib.rs", Edition2021) }
+   0.071329750s  INFO prepare_target{force=false package_id=itoa v1.0.17 target="itoa"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.071909375s  INFO prepare_target{force=false package_id=memchr v2.8.0 target="memchr"}: cargo::core::compiler::fingerprint: fingerprint dirty for memchr v2.8.0/Check { test: false }/TargetInner { benched: false, ..: lib_target("memchr", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.8.0/src/lib.rs", Edition2021) }
+   0.071912541s  INFO prepare_target{force=false package_id=memchr v2.8.0 target="memchr"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.072097375s  INFO prepare_target{force=false package_id=zmij v1.0.21 target="zmij"}: cargo::core::compiler::fingerprint: fingerprint dirty for zmij v1.0.21/Check { test: false }/TargetInner { ..: lib_target("zmij", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zmij-1.0.21/src/lib.rs", Edition2021) }
+   0.072100083s  INFO prepare_target{force=false package_id=zmij v1.0.21 target="zmij"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.072278291s  INFO prepare_target{force=false package_id=thiserror v2.0.18 target="thiserror"}: cargo::core::compiler::fingerprint: fingerprint dirty for thiserror v2.0.18/Check { test: false }/TargetInner { ..: lib_target("thiserror", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs", Edition2021) }
+   0.072280875s  INFO prepare_target{force=false package_id=thiserror v2.0.18 target="thiserror"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.072620416s  INFO prepare_target{force=false package_id=clap v4.5.60 target="clap"}: cargo::core::compiler::fingerprint: fingerprint dirty for clap v4.5.60/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap-4.5.60/src/lib.rs", Edition2021) }
+   0.072623041s  INFO prepare_target{force=false package_id=clap v4.5.60 target="clap"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.072906708s  INFO prepare_target{force=false package_id=clap_builder v4.5.60 target="clap_builder"}: cargo::core::compiler::fingerprint: fingerprint dirty for clap_builder v4.5.60/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap_builder", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_builder-4.5.60/src/lib.rs", Edition2021) }
+   0.072909750s  INFO prepare_target{force=false package_id=clap_builder v4.5.60 target="clap_builder"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073169125s  INFO prepare_target{force=false package_id=anstream v0.6.21 target="anstream"}: cargo::core::compiler::fingerprint: fingerprint dirty for anstream v0.6.21/Check { test: false }/TargetInner { ..: lib_target("anstream", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstream-0.6.21/src/lib.rs", Edition2021) }
+   0.073171666s  INFO prepare_target{force=false package_id=anstream v0.6.21 target="anstream"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073482250s  INFO prepare_target{force=false package_id=anstyle v1.0.13 target="anstyle"}: cargo::core::compiler::fingerprint: fingerprint dirty for anstyle v1.0.13/Check { test: false }/TargetInner { ..: lib_target("anstyle", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-1.0.13/src/lib.rs", Edition2021) }
+   0.073484791s  INFO prepare_target{force=false package_id=anstyle v1.0.13 target="anstyle"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073604208s  INFO prepare_target{force=false package_id=anstyle-parse v0.2.7 target="anstyle_parse"}: cargo::core::compiler::fingerprint: fingerprint dirty for anstyle-parse v0.2.7/Check { test: false }/TargetInner { ..: lib_target("anstyle_parse", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-parse-0.2.7/src/lib.rs", Edition2021) }
+   0.073607041s  INFO prepare_target{force=false package_id=anstyle-parse v0.2.7 target="anstyle_parse"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073729041s  INFO prepare_target{force=false package_id=utf8parse v0.2.2 target="utf8parse"}: cargo::core::compiler::fingerprint: fingerprint dirty for utf8parse v0.2.2/Check { test: false }/TargetInner { ..: lib_target("utf8parse", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/utf8parse-0.2.2/src/lib.rs", Edition2018) }
+   0.073731583s  INFO prepare_target{force=false package_id=utf8parse v0.2.2 target="utf8parse"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073842000s  INFO prepare_target{force=false package_id=anstyle-query v1.1.5 target="anstyle_query"}: cargo::core::compiler::fingerprint: fingerprint dirty for anstyle-query v1.1.5/Check { test: false }/TargetInner { ..: lib_target("anstyle_query", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anstyle-query-1.1.5/src/lib.rs", Edition2021) }
+   0.073844875s  INFO prepare_target{force=false package_id=anstyle-query v1.1.5 target="anstyle_query"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.073954958s  INFO prepare_target{force=false package_id=colorchoice v1.0.4 target="colorchoice"}: cargo::core::compiler::fingerprint: fingerprint dirty for colorchoice v1.0.4/Check { test: false }/TargetInner { ..: lib_target("colorchoice", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/colorchoice-1.0.4/src/lib.rs", Edition2021) }
+   0.073957708s  INFO prepare_target{force=false package_id=colorchoice v1.0.4 target="colorchoice"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.074067333s  INFO prepare_target{force=false package_id=is_terminal_polyfill v1.70.2 target="is_terminal_polyfill"}: cargo::core::compiler::fingerprint: fingerprint dirty for is_terminal_polyfill v1.70.2/Check { test: false }/TargetInner { ..: lib_target("is_terminal_polyfill", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/is_terminal_polyfill-1.70.2/src/lib.rs", Edition2021) }
+   0.074070458s  INFO prepare_target{force=false package_id=is_terminal_polyfill v1.70.2 target="is_terminal_polyfill"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.074396041s  INFO prepare_target{force=false package_id=clap_lex v1.0.0 target="clap_lex"}: cargo::core::compiler::fingerprint: fingerprint dirty for clap_lex v1.0.0/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap_lex", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_lex-1.0.0/src/lib.rs", Edition2021) }
+   0.074398583s  INFO prepare_target{force=false package_id=clap_lex v1.0.0 target="clap_lex"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.074508958s  INFO prepare_target{force=false package_id=strsim v0.11.1 target="strsim"}: cargo::core::compiler::fingerprint: fingerprint dirty for strsim v0.11.1/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("strsim", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/strsim-0.11.1/src/lib.rs", Edition2015) }
+   0.074511625s  INFO prepare_target{force=false package_id=strsim v0.11.1 target="strsim"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.074611166s  INFO prepare_target{force=false package_id=terminal_size v0.4.3 target="terminal_size"}: cargo::core::compiler::fingerprint: fingerprint dirty for terminal_size v0.4.3/Check { test: false }/TargetInner { ..: lib_target("terminal_size", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/terminal_size-0.4.3/src/lib.rs", Edition2021) }
+   0.074613791s  INFO prepare_target{force=false package_id=terminal_size v0.4.3 target="terminal_size"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.074853625s  INFO prepare_target{force=false package_id=rustix v1.1.3 target="rustix"}: cargo::core::compiler::fingerprint: fingerprint dirty for rustix v1.1.3/Check { test: false }/TargetInner { ..: lib_target("rustix", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustix-1.1.3/src/lib.rs", Edition2021) }
+   0.074856166s  INFO prepare_target{force=false package_id=rustix v1.1.3 target="rustix"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.075024250s  INFO prepare_target{force=false package_id=bitflags v2.11.0 target="bitflags"}: cargo::core::compiler::fingerprint: fingerprint dirty for bitflags v2.11.0/Check { test: false }/TargetInner { ..: lib_target("bitflags", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitflags-2.11.0/src/lib.rs", Edition2021) }
+   0.075026750s  INFO prepare_target{force=false package_id=bitflags v2.11.0 target="bitflags"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.075189208s  INFO prepare_target{force=false package_id=errno v0.3.14 target="errno"}: cargo::core::compiler::fingerprint: fingerprint dirty for errno v0.3.14/Check { test: false }/TargetInner { ..: lib_target("errno", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/errno-0.3.14/src/lib.rs", Edition2018) }
+   0.075191708s  INFO prepare_target{force=false package_id=errno v0.3.14 target="errno"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.075324875s  INFO prepare_target{force=false package_id=libc v0.2.182 target="libc"}: cargo::core::compiler::fingerprint: fingerprint dirty for libc v0.2.182/Check { test: false }/TargetInner { ..: lib_target("libc", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libc-0.2.182/src/lib.rs", Edition2021) }
+   0.075327791s  INFO prepare_target{force=false package_id=libc v0.2.182 target="libc"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.075812416s  INFO prepare_target{force=false package_id=futures v0.3.32 target="futures"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-0.3.32/src/lib.rs", Edition2018) }
+   0.075815458s  INFO prepare_target{force=false package_id=futures v0.3.32 target="futures"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076036833s  INFO prepare_target{force=false package_id=futures-channel v0.3.32 target="futures_channel"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-channel v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_channel", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-channel-0.3.32/src/lib.rs", Edition2018) }
+   0.076039875s  INFO prepare_target{force=false package_id=futures-channel v0.3.32 target="futures_channel"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076172583s  INFO prepare_target{force=false package_id=futures-core v0.3.32 target="futures_core"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-core v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_core", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-core-0.3.32/src/lib.rs", Edition2018) }
+   0.076175416s  INFO prepare_target{force=false package_id=futures-core v0.3.32 target="futures_core"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076289916s  INFO prepare_target{force=false package_id=futures-sink v0.3.32 target="futures_sink"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-sink v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_sink", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-sink-0.3.32/src/lib.rs", Edition2018) }
+   0.076292625s  INFO prepare_target{force=false package_id=futures-sink v0.3.32 target="futures_sink"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076394625s  INFO prepare_target{force=false package_id=futures-executor v0.3.32 target="futures_executor"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-executor v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_executor", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-executor-0.3.32/src/lib.rs", Edition2018) }
+   0.076397458s  INFO prepare_target{force=false package_id=futures-executor v0.3.32 target="futures_executor"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076554541s  INFO prepare_target{force=false package_id=futures-task v0.3.32 target="futures_task"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-task v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_task", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-task-0.3.32/src/lib.rs", Edition2018) }
+   0.076557625s  INFO prepare_target{force=false package_id=futures-task v0.3.32 target="futures_task"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.076671416s  INFO prepare_target{force=false package_id=futures-util v0.3.32 target="futures_util"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-util v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_util", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-util-0.3.32/src/lib.rs", Edition2018) }
+   0.076674083s  INFO prepare_target{force=false package_id=futures-util v0.3.32 target="futures_util"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077008208s  INFO prepare_target{force=false package_id=futures-io v0.3.32 target="futures_io"}: cargo::core::compiler::fingerprint: fingerprint dirty for futures-io v0.3.32/Check { test: false }/TargetInner { ..: lib_target("futures_io", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-io-0.3.32/src/lib.rs", Edition2018) }
+   0.077011291s  INFO prepare_target{force=false package_id=futures-io v0.3.32 target="futures_io"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077147708s  INFO prepare_target{force=false package_id=pin-project-lite v0.2.17 target="pin_project_lite"}: cargo::core::compiler::fingerprint: fingerprint dirty for pin-project-lite v0.2.17/Check { test: false }/TargetInner { doc_scrape_examples: Disabled, ..: lib_target("pin_project_lite", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pin-project-lite-0.2.17/src/lib.rs", Edition2018) }
+   0.077151375s  INFO prepare_target{force=false package_id=pin-project-lite v0.2.17 target="pin_project_lite"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077363958s  INFO prepare_target{force=false package_id=slab v0.4.12 target="slab"}: cargo::core::compiler::fingerprint: fingerprint dirty for slab v0.4.12/Check { test: false }/TargetInner { ..: lib_target("slab", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/slab-0.4.12/src/lib.rs", Edition2018) }
+   0.077369416s  INFO prepare_target{force=false package_id=slab v0.4.12 target="slab"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077475500s  INFO prepare_target{force=false package_id=itertools v0.14.0 target="itertools"}: cargo::core::compiler::fingerprint: fingerprint dirty for itertools v0.14.0/Check { test: false }/TargetInner { tested: false, benched: false, ..: lib_target("itertools", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/itertools-0.14.0/src/lib.rs", Edition2018) }
+   0.077478208s  INFO prepare_target{force=false package_id=itertools v0.14.0 target="itertools"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077725333s  INFO prepare_target{force=false package_id=either v1.15.0 target="either"}: cargo::core::compiler::fingerprint: fingerprint dirty for either v1.15.0/Check { test: false }/TargetInner { ..: lib_target("either", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/either-1.15.0/src/lib.rs", Edition2021) }
+   0.077727958s  INFO prepare_target{force=false package_id=either v1.15.0 target="either"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.077840458s  INFO prepare_target{force=false package_id=tokio v1.50.0 target="tokio"}: cargo::core::compiler::fingerprint: fingerprint dirty for tokio v1.50.0/Check { test: false }/TargetInner { ..: lib_target("tokio", ["lib"], "/Users/dybucc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.50.0/src/lib.rs", Edition2021) }
+   0.077843041s  INFO prepare_target{force=false package_id=tokio v1.50.0 target="tokio"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.078014625s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint: fingerprint error for tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester)/Check { test: true }/TargetInner { name: "ostep-tester", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/tester/src/main.rs", Edition2024) }
+   0.078018125s  INFO prepare_target{force=false package_id=tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester) target="ostep-tester"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/tester-7660736f2e3248db/test-bin-ostep-tester`
 
 Caused by:
     No such file or directory (os error 2)
@@ -46,5 +136,57 @@ Stack backtrace:
   14: std::rt::lang_start::<()>::{closure#0}
   15: std::rt::lang_start_internal
   16: _main
+   0.078296333s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint: stale: changed "/Users/dybucc/rust-dev/ostep/Cargo.toml"
+   0.078298333s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:           (vs) "/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/wcat-1597bdb9f2de483d/dep-bin-wcat"
+   0.078299500s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1773735752, nanos: 271545703 } < FileTime { seconds: 1773744593, nanos: 893857002 }
+   0.078361791s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint: fingerprint dirty for wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat)/Check { test: false }/TargetInner { name: "wcat", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/initial-utilities/wcat/src/main.rs", Edition2024) }
+   0.078364833s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+   0.078576500s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint: stale: changed "/Users/dybucc/rust-dev/ostep/Cargo.toml"
+   0.078580875s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:           (vs) "/Users/dybucc/rust-dev/ostep/target/debug/.fingerprint/wcat-a25ace8a9cfe46f0/dep-test-bin-wcat"
+   0.078582041s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 1773735752, nanos: 264542727 } < FileTime { seconds: 1773744593, nanos: 893857002 }
+   0.078632791s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint: fingerprint dirty for wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat)/Check { test: true }/TargetInner { name: "wcat", doc: true, ..: with_path("/Users/dybucc/rust-dev/ostep/initial-utilities/wcat/src/main.rs", Edition2024) }
+   0.078635458s  INFO prepare_target{force=false package_id=wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat) target="wcat"}: cargo::core::compiler::fingerprint:     dirty: RustcChanged
+    Checking memchr v2.8.0
+    Checking bitflags v2.11.0
+    Checking futures-core v0.3.32
+    Checking pin-project-lite v0.2.17
+    Checking futures-sink v0.3.32
+    Checking serde_core v1.0.228
+    Checking libc v0.2.182
+    Checking utf8parse v0.2.2
+    Checking futures-task v0.3.32
+    Checking anstyle-query v1.1.5
+    Checking anstyle v1.0.13
+    Checking anstyle-parse v0.2.7
+    Checking is_terminal_polyfill v1.70.2
+    Checking futures-channel v0.3.32
+    Checking colorchoice v1.0.4
+    Checking slab v0.4.12
+    Checking futures-io v0.3.32
+    Checking zmij v1.0.21
+    Checking strsim v0.11.1
+    Checking itoa v1.0.17
+    Checking clap_lex v1.0.0
+    Checking thiserror v2.0.18
+    Checking either v1.15.0
+    Checking anyhow v1.0.101
+    Checking tokio v1.50.0
+    Checking wcat v0.1.0 (/Users/dybucc/rust-dev/ostep/initial-utilities/wcat)
+    Checking futures-util v0.3.32
+    Checking itertools v0.14.0
+    Checking errno v0.3.14
+    Checking rustix v1.1.3
+    Checking terminal_size v0.4.3
+    Checking anstream v0.6.21
+    Checking camino v1.2.2
+    Checking cargo-platform v0.3.2
+    Checking serde v1.0.228
+    Checking serde_json v1.0.149
+    Checking semver v1.0.27
+    Checking clap_builder v4.5.60
+    Checking cargo_metadata v0.23.1 (/Users/dybucc/rust-dev/cargo_metadata)
+    Checking futures-executor v0.3.32
+    Checking futures v0.3.32
+    Checking clap v4.5.60
     Checking tester v0.1.0 (/Users/dybucc/rust-dev/ostep/tester)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.51s
