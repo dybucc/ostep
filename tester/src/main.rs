@@ -361,7 +361,8 @@ fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
     .context("failed to copy binary executable to pwd")
     .with_context(|| {
       format!(
-        "failed while managing binary for cargo workspace package: {target_pkg}"
+        "failed while managing binary for cargo workspace package: \
+         {target_pkg}"
       )
     })?;
 
@@ -416,8 +417,8 @@ fn run_tests<T: Display>(
         })?;
       #[cfg(debug_assertions)]
       eprintln!(
-        "pkg entry: {num}\nout: {out}\nerr: {err}\nrc: {rc}\nrun: {run}\ndesc: \
-         {desc}"
+        "pkg entry: {num}\nout: {out}\nerr: {err}\nrc: {rc}\nrun: \
+         {run}\ndesc: {desc}"
       );
       let mut program_params = run.split_ascii_whitespace();
       let bin = program_params
