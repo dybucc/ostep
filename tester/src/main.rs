@@ -71,6 +71,13 @@ fn main() -> Result<()> {
   run_tests(exe, tests, &target_pkg)
 }
 
+// The things that could be made async in this function:
+// - Nothing. The whole program relies on this piece of code running correctly
+//   before doing anything else. It only does one blocking operation, and that
+//   is the command to fetch cargo metadata from the pwd. There's nothing to be
+//   done in-between, because everything relies on this. Unless we want to get
+//   fancy with some spinner animation to give back feedback to the user as the
+//   test harness checks the environment.
 fn find_pkg() -> Result<String> {
   let workspace_metadata = MetadataCommand::new()
     .no_deps()
@@ -144,6 +151,12 @@ fn find_pkg() -> Result<String> {
   })
 }
 
+// Things that could be made async in this function:
+// - Maybe Tokio or smol have some alternative way of reading in all entries in
+//   a single directory asynchronously, but that may not be the case. If it is,
+//   though, it may be worth it to switch to reading each entry asynchronously
+//   to maximize the rate at which they're read individually, though I may be
+//   confusing parallelism with concurrency here.
 fn find_tests() -> Result<Vec<(PathBuf, usize, OsString)>> {
   fs::read_dir("./tests")
     .context(
@@ -208,6 +221,12 @@ fn find_tests() -> Result<Vec<(PathBuf, usize, OsString)>> {
     })
 }
 
+// Things that could be made async here:
+// - Each test entry's files are read in serailly, which is to some extent a
+//   blocking operation driven by a CPU-bound operation (traversing all test
+//   entries.) That could be made async, but the potential gains here are making
+//   the overall function async to allow another routine (`copy_exe()`) to run
+//   concurrencly.
 fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> Result<Vec<Test>> {
   Ok(
     tests
@@ -311,6 +330,12 @@ fn parse_build_json(input: Value) -> Option<PathBuf> {
   }
 }
 
+// Things that could be made async here:
+// - Nothing much. The only blocking operations are command invocations that
+//   rely on being executed in serial, and whose output is required for the
+//   final `run_tests()` operation. It could be made async "overall," because
+//   there's other I/O-bound operations in other routines that could be running
+//   as well, so there's that.
 fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
   let exe = parse_build_json(
     serde_json::from_str(&preprocess_build_json({
@@ -379,6 +404,9 @@ fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
   ))
 }
 
+// Things that could be made async here:
+// - Each test run is bound to block with the invocation command for the program
+//   being tested, so that could be made async.
 fn run_tests<T: Display>(
   exe: String,
   tests: Vec<Test>,
