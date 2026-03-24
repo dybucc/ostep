@@ -63,7 +63,8 @@ struct Args {
   package: Option<String>,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
   let (target_pkg, mut tests) = (find_pkg()?, find_tests()?);
   tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
   let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
