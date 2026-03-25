@@ -59,7 +59,7 @@ impl Default for Test {
 /// testing practices.)
 struct Args {
   #[arg(short, long)]
-  /// Specify the package to work on in a workspace.
+  /// Specify the package to work on in a multi-package workspace.
   package: Option<String>,
 }
 
