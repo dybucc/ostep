@@ -18,6 +18,7 @@ use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use serde_json::Value;
+use tokio::process::Command as AsyncCommand;
 
 #[derive(Debug)]
 struct Test {
@@ -65,11 +66,23 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+  tokio::try_join!(spinner(), async {
+    let target_pkg = find_pkg().await?;
+
+    Ok(())
+  });
   let (target_pkg, mut tests) = (find_pkg()?, find_tests()?);
   tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
   let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
   run_tests(exe, tests, &target_pkg)
+}
+
+pub(crate) async fn spinner() -> Result<()> {
+  // TODO: progress spinner that uses message passing between tasks to change
+  // current progress message.
+
+  Ok(())
 }
 
 // The things that could be made async in this function:
@@ -79,11 +92,28 @@ async fn main() -> Result<()> {
 //   done in-between, because everything relies on this. Unless we want to get
 //   fancy with some spinner animation to give back feedback to the user as the
 //   test harness checks the environment.
-fn find_pkg() -> Result<String> {
-  let workspace_metadata = MetadataCommand::new()
-    .no_deps()
-    .exec()
-    .context("failed to query cargo workspace/package during initialization")?;
+pub(crate) async fn find_pkg() -> Result<String> {
+  let workspace_metadata = MetadataCommand::parse(
+    str::from_utf8(
+      &AsyncCommand::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .await
+        .context("failed to query cargo workspace/package")
+        .context("failed during initialization")?
+        .exit_ok()
+        .context("failed to query cargo workspace/package")
+        .context("failed during initialization")?
+        .stdout,
+    )
+    .context(
+      "failed to convert output bytes from `cargo metadata` command to `str`",
+    )
+    .context("failed during initialization")?,
+  )
+  .context(
+    "failed to parse output of `cargo metadata` package during initialization",
+  )?;
   let workspace_packages = workspace_metadata.workspace_packages();
 
   Ok(match workspace_packages.len() {
