@@ -18,7 +18,12 @@ use anyhow::{Context, Ok, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use serde_json::Value;
-use tokio::process::Command as AsyncCommand;
+use tokio::{
+  io::{self, AsyncWriteExt},
+  process::Command as AsyncCommand,
+  sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+  task,
+};
 
 #[derive(Debug)]
 struct Test {
@@ -47,6 +52,8 @@ impl Default for Test {
   }
 }
 
+/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
+/// testing practices.)
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -56,43 +63,81 @@ impl Default for Test {
     disable_help_subcommand = true,
     infer_long_args = true
 )]
-/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
-/// testing practices.)
 struct Args {
-  #[arg(short, long)]
   /// Specify the package to work on in a multi-package workspace.
+  #[arg(short, long)]
   package: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) enum Order {
+  FindPkg(Cow<'static, str>),
+  FindTests(Cow<'static, str>),
+}
+
+#[derive(Debug)]
+pub(crate) enum SpinnerState {
+  Hor,
+  Left,
+  Vert,
+  Right,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-  tokio::try_join!(spinner(), async {
-    let target_pkg = find_pkg().await?;
+  // TODO: handle errors if `try_join` exits early.
+  let (tx, rx) = mpsc::unbounded_channel();
+  let init = async move {
+    let (target_pkg, mut tests) =
+      (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
+    task::spawn_blocking(|| {
+      tests.sort_unstable_by_key(|&(_, test_num, _)| test_num)
+    });
+    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
     Ok(())
-  });
-  let (target_pkg, mut tests) = (find_pkg()?, find_tests()?);
-  tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-  let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+  };
+  tokio::try_join!(spinner(rx), init);
 
   run_tests(exe, tests, &target_pkg)
 }
 
-pub(crate) async fn spinner() -> Result<()> {
-  // TODO: progress spinner that uses message passing between tasks to change
-  // current progress message.
+static PROGRESS_SPINNERS: [&str; 4] = ["-", "\\", "|", "/"];
+
+macro_rules! awrite {
+  ($buf:expr) => {{ io::stdout().write_all($buf).await }};
+}
+
+pub(crate) async fn spinner(mut rx: UnboundedReceiver<Order>) -> Result<()> {
+  macro_rules! report {
+    ($msg:expr, $spinner:expr) => {{
+      let msg = format!(
+        "{} {}",
+        match $spinner {
+          | SpinnerState::Hor => PROGRESS_SPINNERS[0],
+          | SpinnerState::Left => PROGRESS_SPINNERS[1],
+          | SpinnerState::Vert => PROGRESS_SPINNERS[2],
+          | SpinnerState::Right => PROGRESS_SPINNERS[3],
+        },
+        $msg
+      );
+      awrite!(msg.as_bytes());
+    }};
+  }
+
+  let mut current_spinner = SpinnerState::Hor;
+  let reporter = async {};
+  while let Some(order) = rx.recv().await {
+    match order {
+      | Order::FindPkg(msg) => report!(msg, current_spinner),
+      | Order::FindTests(msg) => report!(msg, current_spinner),
+    }
+  }
 
   Ok(())
 }
 
-// The things that could be made async in this function:
-// - Nothing. The whole program relies on this piece of code running correctly
-//   before doing anything else. It only does one blocking operation, and that
-//   is the command to fetch cargo metadata from the pwd. There's nothing to be
-//   done in-between, because everything relies on this. Unless we want to get
-//   fancy with some spinner animation to give back feedback to the user as the
-//   test harness checks the environment.
-pub(crate) async fn find_pkg() -> Result<String> {
+pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
   let workspace_metadata = MetadataCommand::parse(
     str::from_utf8(
       &AsyncCommand::new("cargo")
@@ -102,7 +147,7 @@ pub(crate) async fn find_pkg() -> Result<String> {
         .context("failed to query cargo workspace/package")
         .context("failed during initialization")?
         .exit_ok()
-        .context("failed to query cargo workspace/package")
+        .context("`cargo metadata` invocation failed")
         .context("failed during initialization")?
         .stdout,
     )
@@ -123,7 +168,7 @@ pub(crate) async fn find_pkg() -> Result<String> {
       let arg_pkg_name = Args::parse().package;
 
       if let ControlFlow::Break(pkg) =
-        workspace_packages.iter().try_fold(None, |_: Option<()>, pkg| {
+        workspace_packages.iter().try_fold((), |_, pkg| {
           if let Some(path) = pkg.manifest_path.parent()
             && path == pwd
           {
@@ -135,7 +180,7 @@ pub(crate) async fn find_pkg() -> Result<String> {
             return ControlFlow::Break(pkg);
           }
 
-          ControlFlow::Continue(None)
+          ControlFlow::Continue(())
         })
       {
         let pkg_path = pkg
@@ -188,7 +233,9 @@ pub(crate) async fn find_pkg() -> Result<String> {
 //   though, it may be worth it to switch to reading each entry asynchronously
 //   to maximize the rate at which they're read individually, though I may be
 //   confusing parallelism with concurrency here.
-fn find_tests() -> Result<Vec<(PathBuf, usize, OsString)>> {
+pub(crate) async fn find_tests(
+  tx: UnboundedSender<Order>,
+) -> Result<Vec<(PathBuf, usize, OsString)>> {
   fs::read_dir("./tests")
     .context(
       "the `tests` directory should be present in the folder where you're \
