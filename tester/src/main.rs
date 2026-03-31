@@ -12,6 +12,7 @@ use std::{
   ops::ControlFlow,
   path::PathBuf,
   process::Command,
+  result::Result as StdResult,
 };
 
 use anyhow::{Context, Ok, Result, anyhow, bail};
@@ -21,7 +22,7 @@ use serde_json::Value;
 use tokio::{
   io::{self, AsyncWriteExt},
   process::Command as AsyncCommand,
-  sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+  sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TryRecvError},
   task,
 };
 
@@ -75,19 +76,34 @@ pub(crate) enum Order {
   FindTests(Cow<'static, str>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) enum SpinnerState {
+  #[default]
   Hor,
   Left,
   Vert,
   Right,
 }
 
+impl SpinnerState {
+  fn prog(self) -> Self {
+    match self {
+      | Self::Hor => Self::Left,
+      | Self::Left => Self::Vert,
+      | Self::Vert => Self::Right,
+      | Self::Right => Self::Hor,
+    }
+  }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
   // TODO: handle errors if `try_join` exits early.
   let (tx, rx) = mpsc::unbounded_channel();
-  let init = async move {
+  tokio::try_join!(spinner(rx), async move {
+    // TODO: remove once everything is async and replace the last clone with the
+    // owning `tx`.
+    let tx = tx;
     let (target_pkg, mut tests) =
       (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
     task::spawn_blocking(|| {
@@ -96,8 +112,7 @@ async fn main() -> Result<()> {
     let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
     Ok(())
-  };
-  tokio::try_join!(spinner(rx), init);
+  });
 
   run_tests(exe, tests, &target_pkg)
 }
@@ -111,28 +126,56 @@ macro_rules! awrite {
 pub(crate) async fn spinner(mut rx: UnboundedReceiver<Order>) -> Result<()> {
   macro_rules! report {
     ($msg:expr, $spinner:expr) => {{
-      let msg = format!(
-        "{} {}",
-        match $spinner {
-          | SpinnerState::Hor => PROGRESS_SPINNERS[0],
-          | SpinnerState::Left => PROGRESS_SPINNERS[1],
-          | SpinnerState::Vert => PROGRESS_SPINNERS[2],
-          | SpinnerState::Right => PROGRESS_SPINNERS[3],
-        },
-        $msg
-      );
-      awrite!(msg.as_bytes());
+      awrite!(
+        format!(
+          "{} {}",
+          match $spinner {
+            | SpinnerState::Hor => PROGRESS_SPINNERS[0],
+            | SpinnerState::Left => PROGRESS_SPINNERS[1],
+            | SpinnerState::Vert => PROGRESS_SPINNERS[2],
+            | SpinnerState::Right => PROGRESS_SPINNERS[3],
+          },
+          $msg
+        )
+        .as_bytes()
+      )
     }};
   }
 
-  let mut current_spinner = SpinnerState::Hor;
-  let reporter = async {};
-  while let Some(order) = rx.recv().await {
-    match order {
-      | Order::FindPkg(msg) => report!(msg, current_spinner),
-      | Order::FindTests(msg) => report!(msg, current_spinner),
-    }
-  }
+  let (comms_tx, mut comms_rx) = mpsc::channel(1);
+  tokio::try_join!(
+    task::spawn(async move {
+      while let Some(order) = rx.recv().await {
+        match order {
+          | Order::FindPkg(msg) => _ = comms_tx.send(msg).await,
+          | Order::FindTests(msg) => _ = comms_tx.send(msg).await,
+        }
+      }
+
+      Ok(())
+    }),
+    task::spawn(async move {
+      let (mut msg, mut spinner) = (None, SpinnerState::default());
+      loop {
+        match comms_rx.try_recv() {
+          | StdResult::Ok(new_msg) =>
+            (msg = Some(new_msg), spinner = spinner.prog()).0,
+          | StdResult::Err(e) if matches!(e, TryRecvError::Disconnected) =>
+            break,
+          | _ if matches!(msg, None) => continue,
+          | _ => (),
+        }
+        report!(
+          msg.as_ref().expect(
+            "`msg` should not be `None` if the receiver returned something"
+          ),
+          spinner
+        )?;
+      }
+
+      Ok(())
+    })
+  );
 
   Ok(())
 }
@@ -152,7 +195,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
         .stdout,
     )
     .context(
-      "failed to convert output bytes from `cargo metadata` command to `str`",
+      "failed to convert `stdout` bytes from `cargo metadata` command to `str`",
     )
     .context("failed during initialization")?,
   )
