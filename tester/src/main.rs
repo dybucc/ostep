@@ -8,23 +8,24 @@ use std::{
   env,
   ffi::{OsStr, OsString},
   fmt::Display,
-  fs,
   ops::ControlFlow,
   path::PathBuf,
   process::Command,
-  result::Result as StdResult,
+  result::Result,
 };
 
-use anyhow::{Context, Ok, Result, anyhow, bail};
+use anyhow::{Context, Ok, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use serde_json::Value;
 use tokio::{
+  fs,
   io::{self, AsyncWriteExt},
   process::Command as AsyncCommand,
   sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TryRecvError},
   task,
 };
+use tokio_stream::wrappers::ReadDirStream;
 
 #[derive(Debug)]
 struct Test {
@@ -97,22 +98,26 @@ impl SpinnerState {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
   // TODO: handle errors if `try_join` exits early.
   let (tx, rx) = mpsc::unbounded_channel();
-  tokio::try_join!(spinner(rx), async move {
-    // TODO: remove once everything is async and replace the last clone with the
-    // owning `tx`.
-    let tx = tx;
-    let (target_pkg, mut tests) =
-      (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
-    task::spawn_blocking(|| {
-      tests.sort_unstable_by_key(|&(_, test_num, _)| test_num)
-    });
-    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+  let (Result::Ok(()), Result::Ok((exe, tests, target_pkg))) = tokio::try_join!(
+    task::spawn(spinner(rx)),
+    task::spawn(async move {
+      // TODO: remove the below assignment once everything is async and replace
+      // the last clone in the async block with an owning (moved) `tx`.
+      let tx = tx;
+      let (target_pkg, mut tests) =
+        (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
+      tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
+      let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
-    Ok(())
-  });
+      Ok((exe, tests, target_pkg))
+    })
+  )?
+  else {
+    bail!("fatal error")
+  };
 
   run_tests(exe, tests, &target_pkg)
 }
@@ -123,12 +128,19 @@ macro_rules! awrite {
   ($buf:expr) => {{ io::stdout().write_all($buf).await }};
 }
 
-pub(crate) async fn spinner(mut rx: UnboundedReceiver<Order>) -> Result<()> {
+// TODO: refactor the `spinner` routine to use raw terminal printing
+// capabilities, as otherwise the report messages are printed one after the
+// other. This will likely require further reworks when it comes to I/O routine
+// calls in other routines.
+
+pub(crate) async fn spinner(
+  mut rx: UnboundedReceiver<Order>,
+) -> anyhow::Result<()> {
   macro_rules! report {
     ($msg:expr, $spinner:expr) => {{
       awrite!(
         format!(
-          "{} {}",
+          "{} {}\n",
           match $spinner {
             | SpinnerState::Hor => PROGRESS_SPINNERS[0],
             | SpinnerState::Left => PROGRESS_SPINNERS[1],
@@ -143,44 +155,42 @@ pub(crate) async fn spinner(mut rx: UnboundedReceiver<Order>) -> Result<()> {
   }
 
   let (comms_tx, mut comms_rx) = mpsc::channel(1);
+
   tokio::try_join!(
     task::spawn(async move {
       while let Some(order) = rx.recv().await {
         match order {
-          | Order::FindPkg(msg) => _ = comms_tx.send(msg).await,
-          | Order::FindTests(msg) => _ = comms_tx.send(msg).await,
+          | Order::FindPkg(msg) | Order::FindTests(msg) =>
+            _ = comms_tx.send(msg).await,
         }
       }
-
-      Ok(())
     }),
     task::spawn(async move {
       let (mut msg, mut spinner) = (None, SpinnerState::default());
+
       loop {
         match comms_rx.try_recv() {
-          | StdResult::Ok(new_msg) =>
+          | Result::Ok(new_msg) =>
             (msg = Some(new_msg), spinner = spinner.prog()).0,
-          | StdResult::Err(e) if matches!(e, TryRecvError::Disconnected) =>
-            break,
-          | _ if matches!(msg, None) => continue,
-          | _ => (),
+          | Result::Err(TryRecvError::Disconnected) => break Ok(()),
+          | _ if msg.is_none() => (),
+          | _ => report!(msg.as_ref().unwrap(), spinner)
+            .context("failed to write to stdout spinner report messages")?,
         }
-        report!(
-          msg.as_ref().expect(
-            "`msg` should not be `None` if the receiver returned something"
-          ),
-          spinner
-        )?;
       }
-
-      Ok(())
     })
-  );
-
-  Ok(())
+  )?
+  .1
 }
 
-pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
+pub(crate) async fn find_pkg(
+  tx: UnboundedSender<Order>,
+) -> anyhow::Result<String> {
+  const INIT_MSG: &str = "failed during initialization";
+
+  tx.send(Order::FindPkg("parsing cargo workspace".into()))
+    .context("rx end of main comms channel is closed when it shouldn't")
+    .context(INIT_MSG)?;
   let workspace_metadata = MetadataCommand::parse(
     str::from_utf8(
       &AsyncCommand::new("cargo")
@@ -188,20 +198,19 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
         .output()
         .await
         .context("failed to query cargo workspace/package")
-        .context("failed during initialization")?
+        .context(INIT_MSG)?
         .exit_ok()
         .context("`cargo metadata` invocation failed")
-        .context("failed during initialization")?
+        .context(INIT_MSG)?
         .stdout,
     )
     .context(
       "failed to convert `stdout` bytes from `cargo metadata` command to `str`",
     )
-    .context("failed during initialization")?,
+    .context(INIT_MSG)?,
   )
-  .context(
-    "failed to parse output of `cargo metadata` package during initialization",
-  )?;
+  .context("failed to parse output of `cargo metadata`")
+  .context(INIT_MSG)?;
   let workspace_packages = workspace_metadata.workspace_packages();
 
   Ok(match workspace_packages.len() {
@@ -211,7 +220,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
       let arg_pkg_name = Args::parse().package;
 
       if let ControlFlow::Break(pkg) =
-        workspace_packages.iter().try_fold((), |_, pkg| {
+        workspace_packages.iter().try_fold((), |(), pkg| {
           if let Some(path) = pkg.manifest_path.parent()
             && path == pwd
           {
@@ -278,68 +287,69 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Order>) -> Result<String> {
 //   confusing parallelism with concurrency here.
 pub(crate) async fn find_tests(
   tx: UnboundedSender<Order>,
-) -> Result<Vec<(PathBuf, usize, OsString)>> {
-  fs::read_dir("./tests")
-    .context(
-      "the `tests` directory should be present in the folder where you're \
-       running the binary",
-    )?
-    .try_fold(Vec::new(), |mut accum, entry| {
-      let entry = entry.context(
-        "failed to read entry in the `tests` directory when parsing `tests` \
-         directory entries",
-      )?;
-      let entry_path = entry.path();
-      let entry_metadata = entry.metadata().with_context(|| {
-        format!(
-          "failed to read entry fs metadata when parsing `tests` directory \
-           entry: `{}`",
-          entry_path.display()
-        )
-      })?;
-      if entry_metadata.is_file()
-        && let Some(entry_extension) = entry_path.extension()
-        && matches!(
-          entry_extension.as_encoded_bytes(),
-          b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
-        )
-      {
-        let entry_num = entry_path
-          .file_stem()
-          .ok_or(anyhow!("file doesn't contain file stem"))
-          .context("expected file stem to be a numeric value denoting the test")
-          .with_context(|| {
-            format!(
-              "failed when parsing `tests` directory entry: `{}`",
-              entry_path.display()
-            )
-          })?
-          .to_str()
-          .ok_or(anyhow!("file contains non-utf8 codepoints"))
-          .context(
-            "expected utf-8-compliant values for each test; each test should \
-             denote a numeric value",
-          )
-          .with_context(|| {
-            format!(
-              "failed when parsing `tests` directory entry: `{}`",
-              entry_path.display()
-            )
-          })?
-          .parse::<usize>()
-          .context("expected file to denote a test number in the suite")
-          .with_context(|| {
-            format!(
-              "failed when parsing `tests` directory entry: `{}`",
-              entry_path.display()
-            )
-          })?;
-        let entry_extension = entry_extension.to_os_string();
-        accum.push((entry_path, entry_num, entry_extension));
-      }
+) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
+  tx.send(Order::FindTests("".into())).context("")?;
 
-      Ok(accum)
-    })
+  ReadDirStream::new(fs::read_dir("./tests").await.context(
+    "the `tests` directory should be present in the folder where you're \
+     running the binary",
+  )?)
+  .try_fold(Vec::new(), |mut accum, entry| {
+    let entry = entry.context(
+      "failed to read entry in the `tests` directory when parsing `tests` \
+       directory entries",
+    )?;
+    let entry_path = entry.path();
+    let entry_metadata = entry.metadata().with_context(|| {
+      format!(
+        "failed to read entry fs metadata when parsing `tests` directory \
+         entry: `{}`",
+        entry_path.display()
+      )
+    })?;
+    if entry_metadata.is_file()
+      && let Some(entry_extension) = entry_path.extension()
+      && matches!(
+        entry_extension.as_encoded_bytes(),
+        b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
+      )
+    {
+      let entry_num = entry_path
+        .file_stem()
+        .ok_or(anyhow!("file doesn't contain file stem"))
+        .context("expected file stem to be a numeric value denoting the test")
+        .with_context(|| {
+          format!(
+            "failed when parsing `tests` directory entry: `{}`",
+            entry_path.display()
+          )
+        })?
+        .to_str()
+        .ok_or(anyhow!("file contains non-utf8 codepoints"))
+        .context(
+          "expected utf-8-compliant values for each test; each test should \
+           denote a numeric value",
+        )
+        .with_context(|| {
+          format!(
+            "failed when parsing `tests` directory entry: `{}`",
+            entry_path.display()
+          )
+        })?
+        .parse::<usize>()
+        .context("expected file to denote a test number in the suite")
+        .with_context(|| {
+          format!(
+            "failed when parsing `tests` directory entry: `{}`",
+            entry_path.display()
+          )
+        })?;
+      let entry_extension = entry_extension.to_os_string();
+      accum.push((entry_path, entry_num, entry_extension));
+    }
+
+    Ok(accum)
+  })
 }
 
 // Things that could be made async here:
@@ -348,7 +358,9 @@ pub(crate) async fn find_tests(
 //   entries.) That could be made async, but the potential gains here are making
 //   the overall function async to allow another routine (`copy_exe()`) to run
 //   concurrencly.
-fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> Result<Vec<Test>> {
+fn produce_tests(
+  tests: &[(PathBuf, usize, OsString)],
+) -> anyhow::Result<Vec<Test>> {
   Ok(
     tests
       .iter()
@@ -457,7 +469,7 @@ fn parse_build_json(input: Value) -> Option<PathBuf> {
 //   final `run_tests()` operation. It could be made async "overall," because
 //   there's other I/O-bound operations in other routines that could be running
 //   as well, so there's that.
-fn copy_exe<T: Display>(target_pkg: &T) -> Result<String> {
+fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
   let exe = parse_build_json(
     serde_json::from_str(&preprocess_build_json({
       let input = Command::new("cargo")
@@ -532,7 +544,7 @@ fn run_tests<T: Display>(
   exe: String,
   tests: Vec<Test>,
   target_pkg: &T,
-) -> Result<()> {
+) -> anyhow::Result<()> {
   tests.into_iter().try_for_each(
     |Test { num, out, err, rc, run, desc, .. }| {
       // Chanage the below constant if you ever start parsing more info from the
@@ -638,7 +650,7 @@ fn run_tests<T: Display>(
   Ok(())
 }
 
-fn cleanup(mut exe: String) -> Result<()> {
+fn cleanup(mut exe: String) -> anyhow::Result<()> {
   exe.insert_str(0, "./");
   Command::new("rm")
     .arg(exe)
