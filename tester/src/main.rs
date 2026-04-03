@@ -87,12 +87,23 @@ pub(crate) enum SpinnerState {
 }
 
 impl SpinnerState {
+  const PROGRESS_SPINNERS: [&str; 4] = ["-", "\\", "|", "/"];
+
   fn prog(self) -> Self {
     match self {
       | Self::Hor => Self::Left,
       | Self::Left => Self::Vert,
       | Self::Vert => Self::Right,
       | Self::Right => Self::Hor,
+    }
+  }
+
+  fn state(&self) -> &'static str {
+    match self {
+      | Self::Hor => Self::PROGRESS_SPINNERS[0],
+      | Self::Left => Self::PROGRESS_SPINNERS[1],
+      | Self::Vert => Self::PROGRESS_SPINNERS[2],
+      | Self::Right => Self::PROGRESS_SPINNERS[3],
     }
   }
 }
@@ -122,8 +133,6 @@ async fn main() -> anyhow::Result<()> {
   run_tests(exe, tests, &target_pkg)
 }
 
-static PROGRESS_SPINNERS: [&str; 4] = ["-", "\\", "|", "/"];
-
 macro_rules! awrite {
   ($buf:expr) => {{ io::stdout().write_all($buf).await }};
 }
@@ -137,21 +146,9 @@ pub(crate) async fn spinner(
   mut rx: UnboundedReceiver<Order>,
 ) -> anyhow::Result<()> {
   macro_rules! report {
-    ($msg:expr, $spinner:expr) => {{
-      awrite!(
-        format!(
-          "{} {}\n",
-          match $spinner {
-            | SpinnerState::Hor => PROGRESS_SPINNERS[0],
-            | SpinnerState::Left => PROGRESS_SPINNERS[1],
-            | SpinnerState::Vert => PROGRESS_SPINNERS[2],
-            | SpinnerState::Right => PROGRESS_SPINNERS[3],
-          },
-          $msg
-        )
-        .as_bytes()
-      )
-    }};
+    ($msg:expr, $spinner:expr) => {
+      awrite!(format!("{} {}\n", $spinner.state(), $msg).as_bytes())
+    };
   }
 
   let (comms_tx, mut comms_rx) = mpsc::channel(1);
@@ -189,7 +186,7 @@ pub(crate) async fn find_pkg(
   const INIT_MSG: &str = "failed during initialization";
 
   tx.send(Order::FindPkg("parsing cargo workspace".into()))
-    .context("rx end of main comms channel is closed when it shouldn't")
+    .context("rx end of main comms channel closed unexpectedly")
     .context(INIT_MSG)?;
   let workspace_metadata = MetadataCommand::parse(
     str::from_utf8(
