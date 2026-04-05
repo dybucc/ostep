@@ -8,6 +8,8 @@ use std::{
   env,
   ffi::{OsStr, OsString},
   fmt::Display,
+  hint,
+  iter,
   ops::ControlFlow,
   path::PathBuf,
   process::Command,
@@ -17,6 +19,7 @@ use std::{
 use anyhow::{Context, Ok, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
+use futures::{StreamExt, TryStreamExt, stream};
 use serde_json::Value;
 use tokio::{
   fs,
@@ -141,8 +144,8 @@ macro_rules! awrite {
 
 // FIXME: refactor the `spinner` routine to use raw terminal printing
 // capabilities, as otherwise the report messages are printed one after the
-// other. This will likely require further reworks when it comes to I/O routine
-// calls in other routines.
+// other. This will likely require further reworks when it comes to stdout
+// routine calls in other routines.
 
 pub(crate) async fn spinner(
   mut rx: UnboundedReceiver<Op>,
@@ -153,33 +156,39 @@ pub(crate) async fn spinner(
     };
   }
 
-  let (comms_tx, mut comms_rx) = mpsc::channel(1);
+  match iter::once(mpsc::channel(1)).next() {
+    | Some((comms_tx, mut comms_rx)) =>
+      tokio::try_join!(
+        task::spawn(async move {
+          stream::iter(0..1)
+            .cycle()
+            .map(|_| Ok(rx))
+            .try_for_each(|rx| match rx.recv().await {});
+          // while let Some(op) = rx.recv().await {
+          //   match op {
+          //     | Op::FindPkg(msg) | Op::FindTests(msg) =>
+          //       _ = comms_tx.send(msg).await,
+          //   }
+          // }
+        }),
+        task::spawn(async move {
+          let (mut msg, mut spinner) = (None, SpinnerState::default());
 
-  tokio::try_join!(
-    task::spawn(async move {
-      while let Some(order) = rx.recv().await {
-        match order {
-          | Op::FindPkg(msg) | Op::FindTests(msg) =>
-            _ = comms_tx.send(msg).await,
-        }
-      }
-    }),
-    task::spawn(async move {
-      let (mut msg, mut spinner) = (None, SpinnerState::default());
-
-      loop {
-        match comms_rx.try_recv() {
-          | Result::Ok(new_msg) =>
-            (msg = Some(new_msg), spinner = spinner.prog()).0,
-          | Result::Err(TryRecvError::Disconnected) => break Ok(()),
-          | _ if msg.is_none() => (),
-          | _ => report!(msg.as_ref().unwrap(), spinner)
-            .context("failed to write to stdout spinner report messages")?,
-        }
-      }
-    })
-  )?
-  .1
+          loop {
+            match comms_rx.try_recv() {
+              | Result::Ok(new_msg) =>
+                (msg = Some(new_msg), spinner = spinner.prog()).0,
+              | Result::Err(TryRecvError::Disconnected) => break Ok(()),
+              | _ if msg.is_none() => (),
+              | _ => report!(msg.as_ref().unwrap(), spinner)
+                .context("failed to write to stdout spinner report messages")?,
+            }
+          }
+        })
+      )?
+      .1,
+    | _ => unsafe { hint::unreachable_unchecked() },
+  }
 }
 
 pub(crate) async fn find_pkg(
