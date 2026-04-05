@@ -72,7 +72,7 @@ struct Args {
 }
 
 #[derive(Debug)]
-pub(crate) enum Order {
+pub(crate) enum Op {
   FindPkg(Cow<'static, str>),
   FindTests(Cow<'static, str>),
 }
@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
   let (Result::Ok(()), Result::Ok((exe, tests, target_pkg))) = tokio::try_join!(
     task::spawn(spinner(rx)),
     task::spawn(async move {
-      // TODO: remove the below assignment once everything is async and replace
+      // FIXME: remove the below assignment once everything is async and replace
       // the last clone in the async block with an owning (moved) `tx`.
       let tx = tx;
       let (target_pkg, mut tests) =
@@ -133,17 +133,19 @@ async fn main() -> anyhow::Result<()> {
   run_tests(exe, tests, &target_pkg)
 }
 
+const RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
+
 macro_rules! awrite {
   ($buf:expr) => {{ io::stdout().write_all($buf).await }};
 }
 
-// TODO: refactor the `spinner` routine to use raw terminal printing
+// FIXME: refactor the `spinner` routine to use raw terminal printing
 // capabilities, as otherwise the report messages are printed one after the
 // other. This will likely require further reworks when it comes to I/O routine
 // calls in other routines.
 
 pub(crate) async fn spinner(
-  mut rx: UnboundedReceiver<Order>,
+  mut rx: UnboundedReceiver<Op>,
 ) -> anyhow::Result<()> {
   macro_rules! report {
     ($msg:expr, $spinner:expr) => {
@@ -157,7 +159,7 @@ pub(crate) async fn spinner(
     task::spawn(async move {
       while let Some(order) = rx.recv().await {
         match order {
-          | Order::FindPkg(msg) | Order::FindTests(msg) =>
+          | Op::FindPkg(msg) | Op::FindTests(msg) =>
             _ = comms_tx.send(msg).await,
         }
       }
@@ -181,12 +183,12 @@ pub(crate) async fn spinner(
 }
 
 pub(crate) async fn find_pkg(
-  tx: UnboundedSender<Order>,
+  tx: UnboundedSender<Op>,
 ) -> anyhow::Result<String> {
   const INIT_MSG: &str = "failed during initialization";
 
-  tx.send(Order::FindPkg("parsing cargo workspace".into()))
-    .context("rx end of main comms channel closed unexpectedly")
+  tx.send(Op::FindPkg("parsing cargo workspace".into()))
+    .context(RX_ERROR)
     .context(INIT_MSG)?;
   let workspace_metadata = MetadataCommand::parse(
     str::from_utf8(
@@ -276,16 +278,10 @@ pub(crate) async fn find_pkg(
   })
 }
 
-// Things that could be made async in this function:
-// - Maybe Tokio or smol have some alternative way of reading in all entries in
-//   a single directory asynchronously, but that may not be the case. If it is,
-//   though, it may be worth it to switch to reading each entry asynchronously
-//   to maximize the rate at which they're read individually, though I may be
-//   confusing parallelism with concurrency here.
 pub(crate) async fn find_tests(
-  tx: UnboundedSender<Order>,
+  tx: UnboundedSender<Op>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
-  tx.send(Order::FindTests("".into())).context("")?;
+  tx.send(Op::FindTests("parsing tests".into())).context(RX_ERROR)?;
 
   ReadDirStream::new(fs::read_dir("./tests").await.context(
     "the `tests` directory should be present in the folder where you're \
