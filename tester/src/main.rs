@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context, Ok, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, TryStreamExt, future, stream};
 use serde_json::Value;
 use tokio::{
   fs,
@@ -113,22 +113,24 @@ impl SpinnerState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  // TODO: handle errors if `try_join` exits early.
   let (tx, rx) = mpsc::unbounded_channel();
-  let (Result::Ok(()), Result::Ok((exe, tests, target_pkg))) = tokio::try_join!(
-    task::spawn(spinner(rx)),
-    task::spawn(async move {
-      // FIXME: remove the below assignment once everything is async and replace
-      // the last clone in the async block with an owning (moved) `tx`.
-      let tx = tx;
-      let (target_pkg, mut tests) =
-        (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
-      tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
-      let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+  let (Result::Ok(()), Result::Ok((exe, tests, target_pkg))) =
+    future::try_join(
+      task::spawn(spinner(rx)),
+      task::spawn(async move {
+        // FIXME: remove the below assignment once everything is async and
+        // replace the last clone in the async block with an owning (moved)
+        // `tx`.
+        let tx = tx;
+        let (target_pkg, mut tests) =
+          (find_pkg(tx.clone()).await?, find_tests(tx.clone()).await?);
+        tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
+        let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
 
-      Ok((exe, tests, target_pkg))
-    })
-  )?
+        Ok((exe, tests, target_pkg))
+      }),
+    )
+    .await?
   else {
     bail!("fatal error")
   };
@@ -148,7 +150,7 @@ macro_rules! awrite {
 // routine calls in other routines.
 
 pub(crate) async fn spinner(
-  mut rx: UnboundedReceiver<Op>,
+  mut rx: UnboundedReceiver<Cow<'static, str>>,
 ) -> anyhow::Result<()> {
   macro_rules! report {
     ($msg:expr, $spinner:expr) => {
@@ -158,18 +160,11 @@ pub(crate) async fn spinner(
 
   match iter::once(mpsc::channel(1)).next() {
     | Some((comms_tx, mut comms_rx)) =>
-      tokio::try_join!(
+      future::try_join(
         task::spawn(async move {
-          stream::iter(0..1)
-            .cycle()
-            .map(|_| Ok(rx))
-            .try_for_each(|rx| match rx.recv().await {});
-          // while let Some(op) = rx.recv().await {
-          //   match op {
-          //     | Op::FindPkg(msg) | Op::FindTests(msg) =>
-          //       _ = comms_tx.send(msg).await,
-          //   }
-          // }
+          while let Some(msg) = rx.recv().await {
+            comms_tx.send(msg).await;
+          }
         }),
         task::spawn(async move {
           let (mut msg, mut spinner) = (None, SpinnerState::default());
@@ -184,19 +179,21 @@ pub(crate) async fn spinner(
                 .context("failed to write to stdout spinner report messages")?,
             }
           }
-        })
-      )?
+        }),
+      )
+      .await
+      .context("spinner tasks failed to cooperate")?
       .1,
     | _ => unsafe { hint::unreachable_unchecked() },
   }
 }
 
 pub(crate) async fn find_pkg(
-  tx: UnboundedSender<Op>,
+  tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<String> {
   const INIT_MSG: &str = "failed during initialization";
 
-  tx.send(Op::FindPkg("parsing cargo workspace".into()))
+  tx.send("parsing cargo workspace".into())
     .context(RX_ERROR)
     .context(INIT_MSG)?;
   let workspace_metadata = MetadataCommand::parse(
@@ -288,9 +285,9 @@ pub(crate) async fn find_pkg(
 }
 
 pub(crate) async fn find_tests(
-  tx: UnboundedSender<Op>,
+  tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
-  tx.send(Op::FindTests("parsing tests".into())).context(RX_ERROR)?;
+  tx.send("parsing tests".into()).context(RX_ERROR)?;
 
   ReadDirStream::new(fs::read_dir("./tests").await.context(
     "the `tests` directory should be present in the folder where you're \
