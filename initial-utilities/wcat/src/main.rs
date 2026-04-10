@@ -1,12 +1,20 @@
-use std::{env, fs, io::Error, path::Path, process::ExitCode};
+use std::{env, fs, path::Path, process::ExitCode};
 
 fn main() -> ExitCode {
-  #![expect(clippy::unit_arg, reason = "Beauty comes at cost.")]
-
-  match env::args_os().skip(1).try_for_each(|e| {
-    Ok::<_, Error>(print!("{}", fs::read_to_string(Path::new(&e))?))
-  }) {
-    | Ok(_) => ExitCode::SUCCESS,
-    | Err(_) => (println!("wcat: cannot open file"), ExitCode::FAILURE).1,
-  }
+    let args = env::args_os();
+    let args_iter = args.skip(1);
+    for arg in args_iter {
+        let path = Path::new(&arg);
+        let file_contents = {
+            let res = fs::read_to_string(path);
+            if let Ok(file_contents) = res {
+                file_contents
+            } else {
+                println!("wcat: cannot open file");
+                return ExitCode::FAILURE;
+            }
+        };
+        print!("{file_contents}");
+    }
+    ExitCode::SUCCESS
 }
