@@ -9,22 +9,21 @@ use std::{
     borrow::Cow,
     env,
     ffi::{OsStr, OsString},
-    fmt::Display,
-    hint, iter,
+    fmt::{self, Display, Formatter},
     ops::ControlFlow,
     path::PathBuf,
     process::Command,
-    result::Result,
 };
 
-use anyhow::{Context, Ok, anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
+use crossterm::terminal;
 use futures::{StreamExt as _, TryStreamExt, future, stream};
 use serde_json::Value;
 use tokio::{
     fs,
-    io::{self, AsyncWriteExt},
+    io::{self, AsyncWriteExt, Stdout},
     process::Command as AsyncCommand,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TryRecvError},
     task,
@@ -70,12 +69,12 @@ impl Default for Test {
     infer_long_args = true
 )]
 struct Args {
-    /// Specify the package to work on in a multi-package workspace.
+    /// Specify the package to test on in a multi-package workspace.
     #[arg(short, long)]
     package: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SpinnerState {
     #[default]
     Hor,
@@ -87,88 +86,80 @@ pub(crate) enum SpinnerState {
 impl SpinnerState {
     const PROGRESS_SPINNERS: [&str; 4] = ["-", "\\", "|", "/"];
 
-    fn next(self) -> Self {
-        match self {
+    fn next(&mut self) {
+        *self = match self {
             Self::Hor => Self::Left,
             Self::Left => Self::Vert,
             Self::Vert => Self::Right,
             Self::Right => Self::Hor,
-        }
+        };
     }
+}
 
-    fn state(&self) -> &'static str {
+impl Display for SpinnerState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Hor => Self::PROGRESS_SPINNERS[0],
-            Self::Left => Self::PROGRESS_SPINNERS[1],
-            Self::Vert => Self::PROGRESS_SPINNERS[2],
-            Self::Right => Self::PROGRESS_SPINNERS[3],
+            Self::Hor => write!(f, "{}", Self::PROGRESS_SPINNERS[0]),
+            Self::Left => write!(f, "{}", Self::PROGRESS_SPINNERS[1]),
+            Self::Vert => write!(f, "{}", Self::PROGRESS_SPINNERS[2]),
+            Self::Right => write!(f, "{}", Self::PROGRESS_SPINNERS[3]),
         }
     }
 }
+
+const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
+
+// FIXME: write a proc-macro that scans a function for its return value, checks
+// if it's a `Result`, and if it is, then it parses its body and rewrites each
+// fallible function callsite that is annotated with `?` (taking into account
+// one ought parse anything that is not a closure or a macro) and rewrites it
+// such that it goes from this:
+// ```rust
+// tokio::task::spawn_blocking(|| /* do something */).await?;
+// ```
+// To this:
+// ```rust
+// {
+//     let res = tokio::task::spawn_blocking(|| /* do something */).await
+//     if res.is_err() && crossterm::terminal::is_raw_mode_enabled() {
+//         tokio::task::spawn_blocking(|| terminal::disable_raw_mode()).await.unwrap();
+//         res?
+//     };
+// };
+// ```
+// This may require taking everything from `main` into a separate `inner_main`
+// such that the rewrite isn't mixed up with `tokio`'s rewrite of
+// `[tokio::main]`.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let comms = mpsc::unbounded_channel();
-    let tx = comms.0;
-    let rx = comms.1;
-    let spinner_task = {
-        let spinner = spinner(rx);
-        task::spawn(spinner)
-    };
-    let worker_task = {
-        let work = async move {
-            // FIXME: remove the below assignment once everything is async and replace the
-            // last clone in the async block with an owning (moved) `tx`.
-            let tx = tx;
-            let target_pkg = {
-                let tx = tx.clone();
-                let task = find_pkg(tx);
-                let res = task.await;
-                res?
-            };
-            let mut tests = {
-                let tx = tx.clone();
-                let task = find_tests(tx);
-                let res = task.await;
-                res?
-            };
-            let test_num_key = |input: &(PathBuf, usize, OsString)| input.1;
-            tests.sort_unstable_by_key(test_num_key);
-            let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+    let (tx, rx) = mpsc::unbounded_channel();
 
-            Ok((exe, tests, target_pkg))
-        };
-        task::spawn(work)
-    };
-    let res = {
-        let joiner = future::try_join(spinner_task, worker_task);
-        let join_res = joiner.await;
-        let res = join_res?;
-        let spinner_res = res.0;
-        let worker_res = res.1;
-        if spinner_res.is_err() {
-            bail!("failed to handle spinner animation");
-        }
-        if worker_res.is_err() {
-            bail!("failed to complete testing");
-        }
-        worker_res?
-    };
-    let exe = res.0;
-    let tests = res.1;
-    let target_pkg = res.2;
-    run_tests(exe, tests, &target_pkg)
+    // Enable terminal raw mode to allow moving the cursor and rewriting progress
+    // messages in a single line.
+    task::spawn_blocking(|| terminal::enable_raw_mode()).await??;
+
+    // The futures reprsent the two main threads of execution here; Namely,
+    // (1) the spinner that is always running in the "foreground" to notify of
+    //     progress and/or errors, and
+    // (2) the worker task that performs all of the testing harness functionality
+    //     while occasionally updating the message shown on the spinner.
+    match future::try_join(task::spawn(spinner(rx)), task::spawn(worker(tx))).await? {
+        (Err(_), Err(_)) => bail!("fatal failure"),
+        (Err(_), _) => bail!("failed to handle spinner animation"),
+        (_, res) => res,
+    }
 }
 
-const RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
+pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
+    let target_pkg = find_pkg(tx.clone()).await?;
+    let mut tests = find_tests(tx.clone()).await?;
 
-#[macro_export]
-macro_rules! awrite {
-    ($buf:expr) => {{
-        use ::tokio::io;
+    tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
 
-        io::stdout().write_all($buf).await
-    }};
+    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+
+    run_tests(exe, tests, &target_pkg)
 }
 
 // FIXME: refactor the `spinner` routine to use raw terminal printing
@@ -177,85 +168,57 @@ macro_rules! awrite {
 // routine calls in other routines.
 
 pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> anyhow::Result<()> {
-    macro_rules! report {
-        ($msg:expr, $spinner:expr) => {{
-            use ::std::format;
-
-            #[expect(unused, reason = "It's actually used right below.")]
-            use crate::awrite;
-
-            let msg = format!("{} {}\n", $spinner.state(), $msg).into_bytes();
-            let msg = &msg;
-            awrite!(msg)
-        }};
+    async fn report(
+        spinner_state: SpinnerState,
+        msg: impl AsRef<str>,
+        stdout: &mut Stdout,
+    ) -> anyhow::Result<()> {
+        stdout
+            .write_all(&format!("{} {}", spinner_state, msg.as_ref()).into_bytes())
+            .await
+            .map_err(Into::into)
     }
 
-    let comms = mpsc::channel(1);
-    let inner_tx = comms.0;
-    let mut inner_rx = comms.1;
-    let msg_intercept_task = {
-        let msg_intercept = async move {
-            loop {
-                let event = rx.recv();
-                let maybe_msg = event.await;
-                if let Some(msg) = maybe_msg {
-                    let report_to_spinner = inner_tx.send(msg);
-                    report_to_spinner.await;
+    let (inner_tx, mut inner_rx) = mpsc::channel(1);
+
+    let msg_intercept_task = task::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            inner_tx.send(msg).await;
+        }
+    });
+    let spinner_task = task::spawn(async move {
+        let mut msg = None;
+        let mut spinner = SpinnerState::default();
+        let mut stdout = io::stdout();
+
+        loop {
+            match inner_rx.try_recv() {
+                // Updates the message if we've got a new one. This means the testing harness has
+                // transitioned into a new phase (e.g. from initialization to parsing contents of
+                // test files.)
+                Ok(new_msg) => {
+                    spinner.next();
+                    report(spinner, &new_msg, &mut stdout);
+                    msg = new_msg.into();
                 }
+                Err(TryRecvError::Disconnected) => break anyhow::Ok(()),
+                Err(_) => report(spinner, msg.as_ref().unwrap(), &mut stdout)
+                    .await
+                    .context("")?,
             }
-        };
-        task::spawn(msg_intercept)
-    };
-    let spinner_task = {
-        let spinner = async move {
-            let mut msg = None;
-            let mut spinner = SpinnerState::default();
-            loop {
-                let event = inner_rx.try_recv();
-                match event {
-                    Result::Ok(new_msg) => {
-                        let new_msg = Some(new_msg);
-                        msg = new_msg;
-                        let next_spinner = spinner.next();
-                        spinner = next_spinner;
-                    }
-                    Result::Err(err_kind) => {
-                        let channel_done = matches!(err_kind, TryRecvError::Disconnected);
-                        if channel_done {
-                            break;
-                        }
-                        let first_failure = msg.is_none();
-                        if !first_failure {
-                            let msg = {
-                                let msg = msg.as_ref();
-                                msg.unwrap()
-                            };
-                            let res = {
-                                let res = report!(msg, spinner);
-                                res.context("failed to write to stdout spinner report messages")
-                            };
-                            res?;
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-        task::spawn(spinner)
-    };
-    let join_res = {
-        let task_joiner = future::try_join(msg_intercept_task, spinner_task);
-        task_joiner.await
-    };
-    join_res?;
-    Ok(())
+        }
+    });
+
+    // This returns the result from `spinner_task`, which is the only one for which
+    // we consider failures.
+    future::try_join(msg_intercept_task, spinner_task).await?.1
 }
 
 pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
     const INIT_MSG: &str = "failed during initialization";
 
     tx.send("parsing cargo workspace".into())
-        .context(RX_ERROR)
+        .context(MAIN_RX_ERROR)
         .context(INIT_MSG)?;
     let workspace_metadata = MetadataCommand::parse(
         str::from_utf8(
@@ -277,7 +240,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     .context(INIT_MSG)?;
     let workspace_packages = workspace_metadata.workspace_packages();
 
-    Ok(match workspace_packages.len() {
+    anyhow::Ok(match workspace_packages.len() {
         2.. => {
             let pwd = env::current_dir().context("failed to fetch pwd during initialization")?;
             let arg_pkg_name = Args::parse().package;
@@ -337,7 +300,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
 pub(crate) async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
-    tx.send("parsing tests".into()).context(RX_ERROR)?;
+    tx.send("parsing tests".into()).context(MAIN_RX_ERROR)?;
 
     ReadDirStream::new(fs::read_dir("./tests").await.context(
         "the `tests` directory should be present in the folder where you're running the binary",
@@ -394,7 +357,7 @@ pub(crate) async fn find_tests(
             accum.push((entry_path, entry_num, entry_extension));
         }
 
-        Ok(accum)
+        anyhow::Ok(accum)
     })
 }
 
@@ -405,53 +368,57 @@ pub(crate) async fn find_tests(
 //   the overall function async to allow another routine (`copy_exe()`) to run
 //   concurrencly.
 fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> anyhow::Result<Vec<Test>> {
-    Ok(tests
-        .iter()
-        .try_fold(
-            (Vec::with_capacity(tests.len()), Test::default()),
-            |(mut tests, mut current_test), (test_path, test_num, test_extension)| {
-                if current_test.num != *test_num {
-                    tests.push(current_test);
-                    current_test = Test::default();
-                    current_test.num = *test_num;
-                }
+    anyhow::Ok(
+        tests
+            .iter()
+            .try_fold(
+                (Vec::with_capacity(tests.len()), Test::default()),
+                |(mut tests, mut current_test), (test_path, test_num, test_extension)| {
+                    if current_test.num != *test_num {
+                        tests.push(current_test);
+                        current_test = Test::default();
+                        current_test.num = *test_num;
+                    }
 
-                macro_rules! check_entry {
-                    ($test:expr) => {{
-                        let printable_path = test_path.display();
+                    macro_rules! check_entry {
+                        ($test:expr) => {{
+                            let printable_path = test_path.display();
 
-                        Some(
-                            fs::read_to_string($test.canonicalize().with_context(|| {
-                                format!(
-                                    "failed while parsing `tests` directory entry `{}`",
-                                    printable_path
-                                )
-                            })?)
-                            .with_context(|| {
-                                format!(
-                                    "failed while parsing `tests` directory entry `{}`",
-                                    printable_path
-                                )
-                            })?,
-                        )
-                    }};
-                }
+                            Some(
+                                fs::read_to_string($test.canonicalize().with_context(|| {
+                                    format!(
+                                        "failed while parsing `tests` directory entry `{}`",
+                                        printable_path
+                                    )
+                                })?)
+                                .with_context(|| {
+                                    format!(
+                                        "failed while parsing `tests` directory entry `{}`",
+                                        printable_path
+                                    )
+                                })?,
+                            )
+                        }};
+                    }
 
-                match test_extension.as_encoded_bytes() {
-                    b"rc" => current_test.rc = check_entry!(test_path),
-                    b"out" => current_test.out = check_entry!(test_path),
-                    b"err" => current_test.err = check_entry!(test_path),
-                    b"run" => current_test.run = check_entry!(test_path),
-                    b"desc" => current_test.desc = check_entry!(test_path),
-                    b"pre" => current_test.pre = check_entry!(test_path),
-                    b"post" => current_test.post = check_entry!(test_path),
-                    _ => unreachable!("all file extensions have been filtered past `find_tests()`"),
-                }
+                    match test_extension.as_encoded_bytes() {
+                        b"rc" => current_test.rc = check_entry!(test_path),
+                        b"out" => current_test.out = check_entry!(test_path),
+                        b"err" => current_test.err = check_entry!(test_path),
+                        b"run" => current_test.run = check_entry!(test_path),
+                        b"desc" => current_test.desc = check_entry!(test_path),
+                        b"pre" => current_test.pre = check_entry!(test_path),
+                        b"post" => current_test.post = check_entry!(test_path),
+                        _ => unreachable!(
+                            "all file extensions have been filtered past `find_tests()`"
+                        ),
+                    }
 
-                Ok((tests, current_test))
-            },
-        )?
-        .0)
+                    anyhow::Ok((tests, current_test))
+                },
+            )?
+            .0,
+    )
 }
 
 fn preprocess_build_json(input: Vec<u8>) -> String {
@@ -555,7 +522,7 @@ fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
             format!("failed while managing binary for cargo workspace package: {target_pkg}")
         })?;
 
-    Ok(Cow::into_owned(
+    anyhow::Ok(Cow::into_owned(
         exe.file_name()
             .expect(
                 "owing to `cargo`'s stable formatting guarantees, if the program hasn't already \
@@ -604,7 +571,7 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> anyho
                             ),
                         })?;
 
-                        Ok(accum)
+                        anyhow::Ok(accum)
                     },
                 )
                 .with_context(|| {
@@ -667,13 +634,13 @@ fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> anyho
                 .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"))?;
             println!("sucess\n---");
 
-            Ok(())
+            anyhow::Ok(())
         },
     )?;
     println!("all tests passed");
     cleanup(exe)?;
 
-    Ok(())
+    anyhow::Ok(())
 }
 
 fn cleanup(mut exe: String) -> anyhow::Result<()> {
@@ -685,5 +652,5 @@ fn cleanup(mut exe: String) -> anyhow::Result<()> {
         .exit_ok()
         .context("failed to clean up testing resources")?;
 
-    Ok(())
+    anyhow::Ok(())
 }

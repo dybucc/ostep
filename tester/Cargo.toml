@@ -12,9 +12,11 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.101"
-# cargo_metadata = "0.23.1"
-cargo_metadata = { path = "/Users/dybucc/rust-dev/cargo_metadata" }
+cargo_metadata = { git = "https://github.com/oli-obk/cargo_metadata.git" }
 clap = { version = "4.5.60", features = ["derive", "wrap_help"] }
+crossterm = { git = "https://github.com/crossterm-rs/crossterm.git", features = [
+  "event-stream",
+] }
 futures = "0.3.32"
 itertools = "0.14.0"
 serde = { version = "1.0.228", features = ["derive"] }
