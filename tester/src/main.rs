@@ -5,22 +5,25 @@
     control_flow_into_value
 )]
 
+extern crate self as tester;
+
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     env,
     ffi::{OsStr, OsString},
-    fmt::{self, Display, Formatter},
+    fmt::Display,
     ops::ControlFlow,
     path::PathBuf,
     process::Command,
 };
 
 use anyhow::{Context, anyhow, bail};
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{MetadataCommand, Package};
 use clap::Parser;
 use crossterm::terminal;
 use futures::{StreamExt as _, TryStreamExt, future, stream};
 use serde_json::Value;
+use tester::{args::Args, spinner::spinner, test::Test};
 use tokio::{
     fs,
     io::{self, AsyncWriteExt, Stdout},
@@ -30,82 +33,9 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReadDirStream;
 
-#[derive(Debug)]
-struct Test {
-    num: usize,
-    out: Option<String>,
-    err: Option<String>,
-    rc: Option<String>,
-    run: Option<String>,
-    desc: Option<String>,
-    pre: Option<String>,
-    post: Option<String>,
-}
-
-impl Default for Test {
-    fn default() -> Self {
-        Self {
-            num: 1,
-            out: Option::default(),
-            err: Option::default(),
-            rc: Option::default(),
-            run: Option::default(),
-            desc: Option::default(),
-            pre: Option::default(),
-            post: Option::default(),
-        }
-    }
-}
-
-/// Test harness for OSTEP projects (or anything that aligns with the OSTEP
-/// testing practices.)
-#[derive(Debug, Parser)]
-#[command(
-    version,
-    about,
-    long_about = None,
-    disable_help_flag = true,
-    disable_help_subcommand = true,
-    infer_long_args = true
-)]
-struct Args {
-    /// Specify the package to test on in a multi-package workspace.
-    #[arg(short, long)]
-    package: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SpinnerState {
-    #[default]
-    Hor,
-    Left,
-    Vert,
-    Right,
-}
-
-impl SpinnerState {
-    const PROGRESS_SPINNERS: [&str; 4] = ["-", "\\", "|", "/"];
-
-    fn next(&mut self) {
-        *self = match self {
-            Self::Hor => Self::Left,
-            Self::Left => Self::Vert,
-            Self::Vert => Self::Right,
-            Self::Right => Self::Hor,
-        };
-    }
-}
-
-impl Display for SpinnerState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Hor => write!(f, "{}", Self::PROGRESS_SPINNERS[0]),
-            Self::Left => write!(f, "{}", Self::PROGRESS_SPINNERS[1]),
-            Self::Vert => write!(f, "{}", Self::PROGRESS_SPINNERS[2]),
-            Self::Right => write!(f, "{}", Self::PROGRESS_SPINNERS[3]),
-        }
-    }
-}
+mod args;
+mod spinner;
+mod test;
 
 const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 
@@ -137,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Enable terminal raw mode to allow moving the cursor and rewriting progress
     // messages in a single line.
-    task::spawn_blocking(|| terminal::enable_raw_mode()).await??;
+    task::spawn_blocking(terminal::enable_raw_mode).await??;
 
     // The futures reprsent the two main threads of execution here; Namely,
     // (1) the spinner that is always running in the "foreground" to notify of
@@ -146,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     //     while occasionally updating the message shown on the spinner.
     match future::try_join(task::spawn(spinner(rx)), task::spawn(worker(tx))).await? {
         (Err(_), Err(_)) => bail!("fatal failure"),
-        (Err(_), _) => bail!("failed to handle spinner animation"),
+        (Err(err), _) => Err(err).context("failed to handle spinner animation"),
         (_, res) => res,
     }
 }
@@ -162,64 +92,35 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     run_tests(exe, tests, &target_pkg)
 }
 
-// FIXME: refactor the `spinner` routine to use raw terminal printing
-// capabilities, as otherwise the report messages are printed one after the
-// other. This will likely require further reworks when it comes to stdout
-// routine calls in other routines.
+pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
+    // NOTE: this gets used at the end once a matching package has been found, to
+    // both set the pwd to that package's manifest path, and to return the package's
+    // name.
+    fn finalize(pkg: impl Borrow<Package>) -> anyhow::Result<String> {
+        let Package {
+            name,
+            manifest_path,
+            ..
+        } = pkg.borrow();
 
-pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> anyhow::Result<()> {
-    async fn report(
-        spinner_state: SpinnerState,
-        msg: impl AsRef<str>,
-        stdout: &mut Stdout,
-    ) -> anyhow::Result<()> {
-        stdout
-            .write_all(&format!("{} {}", spinner_state, msg.as_ref()).into_bytes())
-            .await
-            .map_err(Into::into)
+        let pkg_path = manifest_path
+            .parent()
+            .ok_or(anyhow!("pkg manifest path doesn't have a parent dir"))
+            .with_context(|| format!("failed while processing package: {}", *name))?;
+
+        env::set_current_dir(pkg_path)
+            .context("failed to set pwd during initialization")
+            .with_context(|| format!("failed to set pwd to pkg manifest path: {pkg_path}"))?;
+
+        Ok(name.to_string())
     }
 
-    let (inner_tx, mut inner_rx) = mpsc::channel(1);
-
-    let msg_intercept_task = task::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            inner_tx.send(msg).await;
-        }
-    });
-    let spinner_task = task::spawn(async move {
-        let mut msg = None;
-        let mut spinner = SpinnerState::default();
-        let mut stdout = io::stdout();
-
-        loop {
-            match inner_rx.try_recv() {
-                // Updates the message if we've got a new one. This means the testing harness has
-                // transitioned into a new phase (e.g. from initialization to parsing contents of
-                // test files.)
-                Ok(new_msg) => {
-                    spinner.next();
-                    report(spinner, &new_msg, &mut stdout);
-                    msg = new_msg.into();
-                }
-                Err(TryRecvError::Disconnected) => break anyhow::Ok(()),
-                Err(_) => report(spinner, msg.as_ref().unwrap(), &mut stdout)
-                    .await
-                    .context("")?,
-            }
-        }
-    });
-
-    // This returns the result from `spinner_task`, which is the only one for which
-    // we consider failures.
-    future::try_join(msg_intercept_task, spinner_task).await?.1
-}
-
-pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
-    const INIT_MSG: &str = "failed during initialization";
+    const ERR_MSG: &str = "failed during initialization";
 
     tx.send("parsing cargo workspace".into())
         .context(MAIN_RX_ERROR)
-        .context(INIT_MSG)?;
+        .context(ERR_MSG)?;
+
     let workspace_metadata = MetadataCommand::parse(
         str::from_utf8(
             &AsyncCommand::new("cargo")
@@ -227,50 +128,61 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
                 .output()
                 .await
                 .context("failed to query cargo workspace/package")
-                .context(INIT_MSG)?
+                .context(ERR_MSG)?
                 .exit_ok()
                 .context("`cargo metadata` invocation failed")
-                .context(INIT_MSG)?
+                .context(ERR_MSG)?
                 .stdout,
         )
         .context("failed to convert `stdout` bytes from `cargo metadata` command to `str`")
-        .context(INIT_MSG)?,
+        .context(ERR_MSG)?,
     )
     .context("failed to parse output of `cargo metadata`")
-    .context(INIT_MSG)?;
+    .context(ERR_MSG)?;
+
     let workspace_packages = workspace_metadata.workspace_packages();
 
-    anyhow::Ok(match workspace_packages.len() {
-        2.. => {
-            let pwd = env::current_dir().context("failed to fetch pwd during initialization")?;
-            let arg_pkg_name = Args::parse().package;
+    let pwd = env::current_dir()
+        .context("failed to fetch pwd")
+        .context(ERR_MSG)?;
 
-            if let ControlFlow::Break(pkg) = workspace_packages.iter().try_fold((), |(), pkg| {
-                if let Some(path) = pkg.manifest_path.parent()
+    // NOTE: if there's more than a single package in the working directory, we
+    // check two things:
+    // + Some workspace package's manifest path matches the pwd, in which case we
+    //   default to that package.
+    // + Some workspace package's manifest path matches the CLI argument that we got
+    //   passed.
+    //
+    // Otherwise, either the workspace contains no packages or there's only one
+    // package we can default to.
+    Ok(match workspace_packages.len() {
+        2.. => {
+            let cli_pkg = Args::parse().package;
+            let mut pkg = None;
+
+            for workspace_pkg @ Package {
+                name,
+                manifest_path,
+                ..
+            } in &workspace_packages
+            {
+                if let Some(path) = manifest_path.parent()
                     && path == pwd
                 {
-                    return ControlFlow::Break(pkg);
+                    pkg = Some(workspace_pkg);
+                    break;
                 }
-                if let Some(name) = &arg_pkg_name
-                    && pkg.name == name
+
+                if let Some(cli_name) = &cli_pkg
+                    && *cli_name == **name
                 {
-                    return ControlFlow::Break(pkg);
+                    pkg = Some(workspace_pkg);
+                    break;
                 }
+            }
 
-                ControlFlow::Continue(())
-            }) {
-                let pkg_path = pkg
-                    .manifest_path
-                    .parent()
-                    .ok_or(anyhow!("pkg manifest path doesn't have a parent dir"))
-                    .with_context(|| format!("failed while processing package: {}", pkg.name))?;
-                env::set_current_dir(pkg_path)
-                    .context("failed to set pwd during initialization")
-                    .with_context(|| {
-                        format!("failed to set pwd to pkg manifest path: {pkg_path}")
-                    })?;
-
-                pkg.name.to_string()
+            if let Some(pkg) = pkg {
+                finalize(*pkg)?
             } else {
                 bail!(
                     "cargo workspace package directory doesn't match pwd and no `-p` package \
@@ -278,22 +190,8 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
                 );
             }
         }
-        1 => {
-            let target_pkg = workspace_packages.first().unwrap();
-            let target_pkg_path = target_pkg
-                .manifest_path
-                .parent()
-                .ok_or(anyhow!("pkg manifest path doesn't have a parent dir"))
-                .with_context(|| format!("failed while processing package: {}", target_pkg.name))?;
-            env::set_current_dir(target_pkg_path)
-                .context("failed to set pwd during initialization")
-                .with_context(|| {
-                    format!("failed to set pwd to cargo package directory: {target_pkg_path}")
-                })?;
-
-            target_pkg.name.to_string()
-        }
-        _ => bail!("no packages found"),
+        1 => finalize(*workspace_packages.first().unwrap())?,
+        _ => bail!("no packages found in current workspace: {}", pwd.display()),
     })
 }
 
@@ -301,6 +199,10 @@ pub(crate) async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
     tx.send("parsing tests".into()).context(MAIN_RX_ERROR)?;
+
+    let mut dir_stream = fs::read_dir("./tests");
+    // TODO: finish replacing the below iterator/stream based approach with an
+    // async-wise simpler for loop-based approach.
 
     ReadDirStream::new(fs::read_dir("./tests").await.context(
         "the `tests` directory should be present in the folder where you're running the binary",
