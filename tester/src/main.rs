@@ -21,15 +21,18 @@ use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{MetadataCommand, Package};
 use clap::Parser;
 use crossterm::terminal;
-use futures::{StreamExt as _, TryStreamExt, future, stream};
+use futures::{StreamExt as _, future};
+use rayon::{
+    iter::{IntoParallelIterator, ParallelIterator},
+    slice::ParallelSliceMut,
+};
 use serde_json::Value;
 use tester::{args::Args, spinner::spinner, test::Test};
 use tokio::{
     fs,
-    io::{self, AsyncWriteExt, Stdout},
     process::Command as AsyncCommand,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TryRecvError},
-    task,
+    sync::mpsc::{self, UnboundedSender},
+    task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
 
@@ -61,13 +64,23 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 // such that the rewrite isn't mixed up with `tokio`'s rewrite of
 // `[tokio::main]`.
 
+// FIXME(logger): there's somem printing statements that only run under
+// `debug_assertions` which should either use some asynchronous `stderr`
+// printing facility from `tokio`, or that should otherwise be replaced with a
+// proper logger.
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    const INIT_ERR: &str = "failed to complete init terminal raw mode task";
+
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Enable terminal raw mode to allow moving the cursor and rewriting progress
     // messages in a single line.
-    task::spawn_blocking(terminal::enable_raw_mode).await??;
+    task::spawn_blocking(terminal::enable_raw_mode)
+        .await
+        .context(INIT_ERR)?
+        .context(INIT_ERR)?;
 
     // The futures reprsent the two main threads of execution here; Namely,
     // (1) the spinner that is always running in the "foreground" to notify of
@@ -85,9 +98,18 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
 
-    tests.sort_unstable_by_key(|&(_, test_num, _)| test_num);
+    let tests = task::spawn_blocking(move || {
+        tests.par_sort_unstable_by_key(|&(_, test_num, _)| test_num);
 
-    let (exe, tests) = (copy_exe(&target_pkg)?, produce_tests(&tests)?);
+        tests
+    })
+    .await
+    .context("failed to handle blocking task to sort tests by entry number")?;
+
+    let (exe, tests) = match future::try_join(copy_exe(&target_pkg), produce_tests(&tests)).await {
+        Ok(inner) => inner,
+        Err(err) => return Err(err),
+    };
 
     run_tests(exe, tests, &target_pkg)
 }
@@ -200,67 +222,132 @@ pub(crate) async fn find_tests(
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
     tx.send("parsing tests".into()).context(MAIN_RX_ERROR)?;
 
-    let mut dir_stream = fs::read_dir("./tests");
-    // TODO: finish replacing the below iterator/stream based approach with an
-    // async-wise simpler for loop-based approach.
+    let mut dir_stream = ReadDirStream::new(
+        fs::read_dir("./tests")
+            .await
+            .context("failed to read directory with tests")?,
+    );
 
-    ReadDirStream::new(fs::read_dir("./tests").await.context(
-        "the `tests` directory should be present in the folder where you're running the binary",
-    )?)
-    .try_fold(Vec::new(), |mut accum, entry| {
-        let entry = entry.context(
-            "failed to read entry in the `tests` directory when parsing `tests` directory entries",
-        )?;
-        let entry_path = entry.path();
-        let entry_metadata = entry.metadata().with_context(|| {
-            format!(
-                "failed to read entry fs metadata when parsing `tests` directory entry: `{}`",
-                entry_path.display()
-            )
-        })?;
-        if entry_metadata.is_file()
-            && let Some(entry_extension) = entry_path.extension()
-            && matches!(
-                entry_extension.as_encoded_bytes(),
-                b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
-            )
-        {
-            let entry_num = entry_path
-                .file_stem()
-                .ok_or(anyhow!("file doesn't contain file stem"))
-                .context("expected file stem to be a numeric value denoting the test")
-                .with_context(|| {
-                    format!(
-                        "failed when parsing `tests` directory entry: `{}`",
-                        entry_path.display()
-                    )
-                })?
-                .to_str()
-                .ok_or(anyhow!("file contains non-utf8 codepoints"))
-                .context(
-                    "expected utf-8-compliant values for each test; each test should denote a \
-                     numeric value",
-                )
-                .with_context(|| {
-                    format!(
-                        "failed when parsing `tests` directory entry: `{}`",
-                        entry_path.display()
-                    )
-                })?
-                .parse::<usize>()
-                .context("expected file to denote a test number in the suite")
-                .with_context(|| {
-                    format!(
-                        "failed when parsing `tests` directory entry: `{}`",
-                        entry_path.display()
-                    )
-                })?;
-            let entry_extension = entry_extension.to_os_string();
-            accum.push((entry_path, entry_num, entry_extension));
+    let mut task_pool = JoinSet::new();
+
+    // NOTE: this capacity is the one used later on to preallocate the vector that
+    // will hold the test files. It only exists on a best-effort basis, but it
+    // always guarantees that the vector will not have to allocate beyond this
+    // capacity (i.e. it may overallocate for any directory entries under the
+    // `tests` directory that are not tests themselves.)
+    let mut speculative_cap = 0;
+
+    while let Some(dir_entry) = dir_stream.next().await {
+        match dir_entry {
+            Ok(entry) => {
+                speculative_cap += 1;
+
+                // NOTE: we divide up the tasks here without performing the full processing that
+                // is later on left to the traversal over the task pool because that traversal
+                // only conditionally produces values (i.e. only produces values for files that
+                // have been deemed to follow the preestablished schema for OSTEP tests.)
+                task_pool.spawn(async move {
+                    let path = entry.path();
+                    let metadata = entry.metadata().await.with_context(|| {
+                        format!(
+                            "failed to read entry fs metadata when parsing `tests` directory \
+                             entry: `{}`",
+                            path.display()
+                        )
+                    })?;
+
+                    anyhow::Ok((path, metadata))
+                });
+            }
+            Err(io_err) => {
+                task_pool.shutdown().await;
+
+                return Err(anyhow!(io_err)).context(
+                    "failed to read entry in the `tests` directory when parsing `tests` directory \
+                     entries",
+                );
+            }
         }
+    }
 
-        anyhow::Ok(accum)
+    let tasks_result = task_pool.join_all().await;
+
+    // NOTE: the following performs a parallel fold of the above task results, such
+    // that having put aside the operations that benefit from asynchronicity
+    // (i.e. fetching file metadata,) the only thing left is to gather into a
+    // single accumulator value all of the parsed tests, if they haven't failed
+    // during such asyncrhonous I/O. We specifically gather 3-element tuples
+    // consisting of the path to the test file, the entry number of the test and
+    // the test type (which itself depends on the test path's file stem's
+    // extension.)
+    task::spawn_blocking(move || {
+        tasks_result
+            .into_par_iter()
+            .try_fold(
+                || Vec::with_capacity(speculative_cap),
+                |mut accum, result| {
+                    match result {
+                        Ok((path, metadata)) => {
+                            if metadata.is_file()
+                                && let Some(entry_extension) = path.extension()
+                                && matches!(
+                                    entry_extension.as_encoded_bytes(),
+                                    b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
+                                )
+                            {
+                                let num = path
+                                    .file_stem()
+                                    .ok_or(anyhow!("file doesn't contain file stem"))
+                                    .context(
+                                        "expected file stem to be a numeric value denoting the \
+                                         test",
+                                    )
+                                    .with_context(|| {
+                                        format!(
+                                            "failed when parsing `tests` directory entry: `{}`",
+                                            path.display()
+                                        )
+                                    })?
+                                    .to_str()
+                                    .ok_or(anyhow!("file contains non-utf8 codepoints"))
+                                    .context(
+                                        "expected utf-8-compliant values for each test; each test \
+                                         should denote a numeric value",
+                                    )
+                                    .with_context(|| {
+                                        format!(
+                                            "failed when parsing `tests` directory entry: `{}`",
+                                            path.display()
+                                        )
+                                    })?
+                                    .parse::<usize>()
+                                    .context("expected file to denote a test number in the suite")
+                                    .with_context(|| {
+                                        format!(
+                                            "failed when parsing `tests` directory entry: `{}`",
+                                            path.display()
+                                        )
+                                    })?;
+
+                                let extension = entry_extension.to_os_string();
+
+                                accum.push((path, num, extension));
+                            }
+                        }
+                        Err(err) => return Err(err),
+                    }
+
+                    Ok(accum)
+                },
+            )
+            .try_reduce(Vec::new, |mut a, mut b| {
+                a.append(&mut b);
+
+                Ok(a)
+            })
     })
+    .await
+    .context("failed to handle task to manage test entry parsing")?
 }
 
 // Things that could be made async here:
@@ -269,7 +356,10 @@ pub(crate) async fn find_tests(
 //   entries.) That could be made async, but the potential gains here are making
 //   the overall function async to allow another routine (`copy_exe()`) to run
 //   concurrencly.
-fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> anyhow::Result<Vec<Test>> {
+#[expect(clippy::unused_async, reason = "wip.")]
+pub(crate) async fn produce_tests(
+    tests: &[(PathBuf, usize, OsString)],
+) -> anyhow::Result<Vec<Test>> {
     anyhow::Ok(
         tests
             .iter()
@@ -287,12 +377,14 @@ fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> anyhow::Result<Vec<Tes
                             let printable_path = test_path.display();
 
                             Some(
-                                fs::read_to_string($test.canonicalize().with_context(|| {
-                                    format!(
-                                        "failed while parsing `tests` directory entry `{}`",
-                                        printable_path
-                                    )
-                                })?)
+                                std::fs::read_to_string($test.canonicalize().with_context(
+                                    || {
+                                        format!(
+                                            "failed while parsing `tests` directory entry `{}`",
+                                            printable_path
+                                        )
+                                    },
+                                )?)
                                 .with_context(|| {
                                     format!(
                                         "failed while parsing `tests` directory entry `{}`",
@@ -323,102 +415,96 @@ fn produce_tests(tests: &[(PathBuf, usize, OsString)]) -> anyhow::Result<Vec<Tes
     )
 }
 
-fn preprocess_build_json(input: Vec<u8>) -> String {
+pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
     let len = input.len();
 
-    cfg_select! {
-      debug_assertions => {
-        let out = input
-          .into_iter()
-          .try_fold(String::with_capacity(len), |mut output, b| {
-            if b != b'\n' {
-              output.push(char::from(b));
-              return ControlFlow::Continue(output);
-            }
+    let out = input
+        .into_par_iter()
+        .try_fold(
+            || String::with_capacity(len),
+            |mut output, b| {
+                if b != b'\n' {
+                    output.push(char::from(b));
+                    return ControlFlow::Continue(output);
+                }
 
-            ControlFlow::Break(output)
-          })
-          .into_value();
-        eprintln!("{out}");
+                ControlFlow::Break(output)
+            },
+        )
+        .try_reduce(String::new, |a, b| {
+            let mut out = a.into_bytes();
+            out.append(&mut b.into_bytes());
 
-        out
-      }
-      _ => {
-        input
-          .into_iter()
-          .try_fold(String::with_capacity(len), |mut output, b| {
-            if b != b'\n' {
-              output.push(char::from(b));
-              return ControlFlow::Continue(output);
-            }
+            ControlFlow::Continue(String::from_utf8_lossy_owned(out))
+        })
+        .into_value();
 
-            ControlFlow::Break(output)
-          })
-          .into_value()
-      }
-    }
+    #[cfg(debug_assertions)]
+    eprintln!("{out}");
+
+    out
 }
 
-fn parse_build_json(input: Value) -> Option<PathBuf> {
-    if let Value::Object(map) = input
+// TODO: finish verifying the below routine's compliance with non-blocking
+// operations in the `tokio` runtime.
+
+pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
+    let cmd_stdout =
+        AsyncCommand::new("cargo")
+            .args(["build", "--release", "--message-format=json"])
+            .output()
+            .await
+            .context("failed to spawn `cargo-build` on pwd")
+            .with_context(|| {
+                format!(
+                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
+                )
+            })?
+            .exit_ok()
+            .context("package compilation through `cargo-build` failed")
+            .with_context(|| {
+                format!(
+                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
+                )
+            })?
+            .stdout;
+
+    // FIXME(logger):
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "copy_exe: {}",
+        String::from_utf8_lossy_owned(cmd_stdout.clone())
+    );
+
+    let preprocessed_json = task::spawn_blocking(move || preprocess_build_json(cmd_stdout))
+        .await
+        .context("failed to handle task managing cargo build json parsing")?;
+
+    let exe = if let Value::Object(map) =
+        serde_json::from_str(&preprocessed_json)
+            .context("failed to parse json output from `cargo-build`")
+            .with_context(|| {
+                format!(
+                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
+                )
+            })?
         && let Some(Value::String(s)) = map.get("executable")
     {
         Some(PathBuf::from(s))
     } else {
         None
     }
-}
+    .ok_or(anyhow!(
+        "failed to find `executable` entry in cargo build json output"
+    ))
+    .with_context(|| {
+        format!("failed while trying to build binary for cargo workspace package: {target_pkg}")
+    })?;
 
-// Things that could be made async here:
-// - Nothing much. The only blocking operations are command invocations that
-//   rely on being executed in serial, and whose output is required for the
-//   final `run_tests()` operation. It could be made async "overall," because
-//   there's other I/O-bound operations in other routines that could be running
-//   as well, so there's that.
-fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
-    let exe =
-        parse_build_json(
-            serde_json::from_str(&preprocess_build_json({
-                let input = Command::new("cargo")
-                    .args(["build", "--release", "--message-format=json"])
-                    .output()
-                    .context("failed to spawn `cargo-build` on pwd")
-                    .with_context(|| {
-                        format!(
-                            "failed while trying to build binary for cargo workspace package: \
-                             {target_pkg}",
-                        )
-                    })?
-                    .exit_ok()
-                    .context("package compilation through `cargo-build` failed")
-                    .with_context(|| {
-                        format!(
-                            "failed while trying to build binary for cargo workspace package: \
-                             {target_pkg}",
-                        )
-                    })?
-                    .stdout;
-                #[cfg(debug_assertions)]
-                eprintln!("{}", String::from_utf8_lossy_owned(input.clone()));
-
-                input
-            }))
-            .context("failed to parse json output from `cargo-build`")
-            .with_context(|| {
-                format!(
-                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
-                )
-            })?,
-        )
-        .ok_or(anyhow!(
-            "failed to find `executable` entry in cargo build json output"
-        ))
-        .with_context(|| {
-            format!("failed while trying to build binary for cargo workspace package: {target_pkg}")
-        })?;
-    Command::new("cp")
+    AsyncCommand::new("cp")
         .args([exe.as_os_str(), OsStr::new(".")])
         .status()
+        .await
         .context("failed to copy binary executable to pwd")
         .with_context(|| {
             format!("failed while managing binary for cargo workspace package: {target_pkg}")
