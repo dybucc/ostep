@@ -2,19 +2,20 @@
     exit_status_error,
     string_from_utf8_lossy_owned,
     bool_to_result,
-    control_flow_into_value
+    control_flow_into_value,
+    bstr
 )]
 
 extern crate self as tester;
 
 use std::{
     borrow::{Borrow, Cow},
+    bstr::ByteStr,
     env,
     ffi::{OsStr, OsString},
     fmt::Display,
     ops::ControlFlow,
     path::PathBuf,
-    process::Command,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -30,7 +31,7 @@ use serde_json::Value;
 use tester::{args::Args, spinner::spinner, test::Test};
 use tokio::{
     fs,
-    process::Command as AsyncCommand,
+    process::Command,
     sync::mpsc::{self, UnboundedSender},
     task::{self, JoinSet},
 };
@@ -82,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .context(INIT_ERR)?
         .context(INIT_ERR)?;
 
-    // The futures reprsent the two main threads of execution here; Namely,
+    // The futures represent the two main threads of execution here; Namely,
     // (1) the spinner that is always running in the "foreground" to notify of
     //     progress and/or errors, and
     // (2) the worker task that performs all of the testing harness functionality
@@ -95,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
+    // FIXME(async): `find_tests()` can probably run concurrently with `copy_exe()`.
+    // That would require changing the `try_join()` at the end such that the
+    // `produce_tests()` routine only starts running once the `find_tests()` is done
+    // *and* this main worker task is done sorting the tests. A `oneshot` channel
+    // would be enough here.
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
 
@@ -106,12 +112,19 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     .await
     .context("failed to handle blocking task to sort tests by entry number")?;
 
-    let (exe, tests) = match future::try_join(copy_exe(&target_pkg), produce_tests(&tests)).await {
+    // NOTE: because the below two tasks run concurrently, we prefer not to have
+    // them intersperse output from their current progress.
+    tx.send("copying executable to pwd and processing tests".into())
+        .context(MAIN_RX_ERROR)?;
+
+    let (exe, tests) = match future::try_join(copy_exe(&target_pkg), produce_tests(tests)).await {
         Ok(inner) => inner,
         Err(err) => return Err(err),
     };
 
-    run_tests(exe, tests, &target_pkg)
+    tx.send("running tests".into()).context(MAIN_RX_ERROR)?;
+
+    run_tests(exe, tests, target_pkg).await
 }
 
 pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
@@ -145,7 +158,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
 
     let workspace_metadata = MetadataCommand::parse(
         str::from_utf8(
-            &AsyncCommand::new("cargo")
+            &Command::new("cargo")
                 .args(["metadata", "--format-version", "1", "--no-deps"])
                 .output()
                 .await
@@ -177,7 +190,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     //
     // Otherwise, either the workspace contains no packages or there's only one
     // package we can default to.
-    Ok(match workspace_packages.len() {
+    match workspace_packages.len() {
         2.. => {
             let cli_pkg = Args::parse().package;
             let mut pkg = None;
@@ -204,7 +217,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
             }
 
             if let Some(pkg) = pkg {
-                finalize(*pkg)?
+                finalize(*pkg)
             } else {
                 bail!(
                     "cargo workspace package directory doesn't match pwd and no `-p` package \
@@ -212,9 +225,9 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
                 );
             }
         }
-        1 => finalize(*workspace_packages.first().unwrap())?,
+        1 => finalize(*workspace_packages.first().unwrap()),
         _ => bail!("no packages found in current workspace: {}", pwd.display()),
-    })
+    }
 }
 
 pub(crate) async fn find_tests(
@@ -350,69 +363,53 @@ pub(crate) async fn find_tests(
     .context("failed to handle task to manage test entry parsing")?
 }
 
-// Things that could be made async here:
-// - Each test entry's files are read in serailly, which is to some extent a
-//   blocking operation driven by a CPU-bound operation (traversing all test
-//   entries.) That could be made async, but the potential gains here are making
-//   the overall function async to allow another routine (`copy_exe()`) to run
-//   concurrencly.
-#[expect(clippy::unused_async, reason = "wip.")]
 pub(crate) async fn produce_tests(
-    tests: &[(PathBuf, usize, OsString)],
+    tests: Vec<(PathBuf, usize, OsString)>,
 ) -> anyhow::Result<Vec<Test>> {
-    anyhow::Ok(
-        tests
-            .iter()
-            .try_fold(
-                (Vec::with_capacity(tests.len()), Test::default()),
-                |(mut tests, mut current_test), (test_path, test_num, test_extension)| {
-                    if current_test.num != *test_num {
-                        tests.push(current_test);
-                        current_test = Test::default();
-                        current_test.num = *test_num;
-                    }
+    let mut task_pool = JoinSet::new();
 
-                    macro_rules! check_entry {
-                        ($test:expr) => {{
-                            let printable_path = test_path.display();
+    for (test_path, _, test_extension) in tests {
+        task_pool.spawn(async move {
+            let mut test = Test::default();
 
-                            Some(
-                                std::fs::read_to_string($test.canonicalize().with_context(
-                                    || {
-                                        format!(
-                                            "failed while parsing `tests` directory entry `{}`",
-                                            printable_path
-                                        )
-                                    },
-                                )?)
-                                .with_context(|| {
-                                    format!(
-                                        "failed while parsing `tests` directory entry `{}`",
-                                        printable_path
-                                    )
-                                })?,
-                            )
-                        }};
-                    }
+            macro_rules! check_entry {
+                ($test:expr) => {{
+                    let ctx_msg = || {
+                        format!(
+                            "failed while parsing `tests` directory entry `{}`",
+                            $test.display()
+                        )
+                    };
 
-                    match test_extension.as_encoded_bytes() {
-                        b"rc" => current_test.rc = check_entry!(test_path),
-                        b"out" => current_test.out = check_entry!(test_path),
-                        b"err" => current_test.err = check_entry!(test_path),
-                        b"run" => current_test.run = check_entry!(test_path),
-                        b"desc" => current_test.desc = check_entry!(test_path),
-                        b"pre" => current_test.pre = check_entry!(test_path),
-                        b"post" => current_test.post = check_entry!(test_path),
-                        _ => unreachable!(
-                            "all file extensions have been filtered past `find_tests()`"
-                        ),
-                    }
+                    fs::read_to_string(fs::canonicalize(&$test).await.with_context(ctx_msg)?)
+                        .await
+                        .with_context(ctx_msg)?
+                        .into()
+                }};
+            }
 
-                    anyhow::Ok((tests, current_test))
-                },
-            )?
-            .0,
-    )
+            match test_extension.as_encoded_bytes() {
+                b"rc" => test.rc = check_entry!(test_path),
+                b"out" => test.out = check_entry!(test_path),
+                b"err" => test.err = check_entry!(test_path),
+                b"run" => test.run = check_entry!(test_path),
+                b"desc" => test.desc = check_entry!(test_path),
+                b"pre" => test.pre = check_entry!(test_path),
+                b"post" => test.post = check_entry!(test_path),
+                _ => {
+                    unreachable!("all other file extensions have been filtered past `find_tests()`")
+                }
+            }
+
+            Ok(test)
+        });
+    }
+
+    task_pool
+        .join_all()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()
 }
 
 pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
@@ -439,35 +436,27 @@ pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
         })
         .into_value();
 
+    // FIXME(logger):
     #[cfg(debug_assertions)]
     eprintln!("{out}");
 
     out
 }
 
-// TODO: finish verifying the below routine's compliance with non-blocking
-// operations in the `tokio` runtime.
-
 pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
-    let cmd_stdout =
-        AsyncCommand::new("cargo")
-            .args(["build", "--release", "--message-format=json"])
-            .output()
-            .await
-            .context("failed to spawn `cargo-build` on pwd")
-            .with_context(|| {
-                format!(
-                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
-                )
-            })?
-            .exit_ok()
-            .context("package compilation through `cargo-build` failed")
-            .with_context(|| {
-                format!(
-                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
-                )
-            })?
-            .stdout;
+    let ctx_msg =
+        || format!("failed while trying to build binary for cargo workspace package: {target_pkg}");
+
+    let cmd_stdout = Command::new("cargo")
+        .args(["build", "--release", "--message-format=json"])
+        .output()
+        .await
+        .context("failed to spawn `cargo-build` on pwd")
+        .with_context(ctx_msg)?
+        .exit_ok()
+        .context("package build through `cargo-build` failed")
+        .with_context(ctx_msg)?
+        .stdout;
 
     // FIXME(logger):
     #[cfg(debug_assertions)]
@@ -480,162 +469,169 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<Strin
         .await
         .context("failed to handle task managing cargo build json parsing")?;
 
-    let exe = if let Value::Object(map) =
-        serde_json::from_str(&preprocessed_json)
-            .context("failed to parse json output from `cargo-build`")
-            .with_context(|| {
-                format!(
-                    "failed while trying to build binary for cargo workspace package: {target_pkg}",
-                )
-            })?
+    // NOTE: we don't encode the `executable` key of the json because it's part of
+    // the stability guarantees in cargo's output.
+    let exe = if let Value::Object(map) = serde_json::from_str(&preprocessed_json)
+        .context("failed to parse json output from `cargo-build`")
+        .with_context(ctx_msg)?
         && let Some(Value::String(s)) = map.get("executable")
     {
-        Some(PathBuf::from(s))
+        Ok(PathBuf::from(s))
     } else {
-        None
+        Err(anyhow!(
+            "failed to find `executable` entry in cargo build json output"
+        ))
     }
-    .ok_or(anyhow!(
-        "failed to find `executable` entry in cargo build json output"
-    ))
-    .with_context(|| {
-        format!("failed while trying to build binary for cargo workspace package: {target_pkg}")
-    })?;
+    .with_context(ctx_msg)?;
 
-    AsyncCommand::new("cp")
+    Command::new("cp")
         .args([exe.as_os_str(), OsStr::new(".")])
         .status()
         .await
         .context("failed to copy binary executable to pwd")
-        .with_context(|| {
-            format!("failed while managing binary for cargo workspace package: {target_pkg}")
-        })?;
+        .with_context(ctx_msg)?;
 
-    anyhow::Ok(Cow::into_owned(
+    Ok(Cow::into_owned(
         exe.file_name()
             .expect(
-                "owing to `cargo`'s stable formatting guarantees, if the program hasn't already \
-                 thrown an error because the `executable` key in the generated build json is \
-                 missing, then surely it has produced a file path with the last component being \
-                 the name of the executable",
+                "file stem should be present if cargo hasn't failed in producing the build \
+                 metadata output",
             )
             .to_string_lossy(),
     ))
 }
 
-// Things that could be made async here:
-// - Each test run is bound to block with the invocation command for the program
-//   being tested, so that could be made async.
-fn run_tests<T: Display>(exe: String, tests: Vec<Test>, target_pkg: &T) -> anyhow::Result<()> {
-    tests.into_iter().try_for_each(
-        |Test {
+pub(crate) async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
+where
+    for<'a> T: 'a + Display + Send + Sync + Clone,
+{
+    // FIXME(refactor): chanage the below constant if you ever start parsing more
+    // info from the `Test` structure.
+    const TEST_PARAMS: usize = 4;
+
+    let mut task_pool = tests.into_iter().fold(
+        JoinSet::new(),
+        |mut task_pool,
+         Test {
              num,
              out,
              err,
              rc,
              run,
-             desc,
              ..
          }| {
-            // Chanage the below constant if you ever start parsing more info from the
-            // `Test` structure.
-            const TEST_PARAMS: usize = 5;
+            let exe = exe.clone();
+            let target_pkg = target_pkg.clone();
 
-            let [out, err, rc, run, desc] = [out, err, rc, run, desc]
-                .into_iter()
-                .enumerate()
-                .try_fold(
-                    [const { String::new() }; TEST_PARAMS],
-                    |mut accum, (idx, param)| {
-                        accum[idx] = param.ok_or_else(|| match idx {
-                            0 => anyhow!("failed to find `out` test param"),
-                            1 => anyhow!("failed to find `err` test param"),
-                            2 => anyhow!("failed to find `rc` test param"),
-                            3 => anyhow!("failed to find `run` test param"),
-                            4 => anyhow!("failed to find `desc` test param"),
-                            _ => unimplemented!(
-                                "if you hit this case, you are most likely considering more test \
-                                 parameters and should probably reevaluate the whole match arm \
-                                 and its surroundings"
-                            ),
-                        })?;
+            task_pool.spawn(async move {
+                let ctx_msg = || {
+                    format!(
+                        "failed while parsing test entry {num} for pkg: {}",
+                        target_pkg.clone()
+                    )
+                };
 
-                        anyhow::Ok(accum)
-                    },
-                )
-                .with_context(|| {
-                    format!("failed while parsing test entry {num} for pkg: {target_pkg}")
-                })?;
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "pkg entry: {num}\nout: {out}\nerr: {err}\nrc: {rc}\nrun: {run}\ndesc: {desc}"
-            );
-            let mut program_params = run.split_ascii_whitespace();
-            let bin = program_params
-                .next()
-                .ok_or(anyhow!(
-                    "failed to find binary name in `.rc` test file param"
-                ))
-                .with_context(|| {
-                    format!("failed while parsing test entry {num} for pkg: {target_pkg}")
-                })?;
-            (bin.trim_matches(['.', '/']) == exe)
-                .ok_or(anyhow!(
-                    "crate binary doesn't match binary in `.run` test file param"
-                ))
-                .with_context(|| {
-                    format!("crate binary: {exe}, binary name in `.run` test file param: {bin}")
-                })?;
-            print!("running test entry {num} for pkg {target_pkg}:\n{desc}");
-            let output = Command::new(bin).args(program_params).output()?;
-            let status = rc
-                .trim()
-                .parse::<i32>()
-                .context("failed to parse return code in `.rc` test file param")
-                .with_context(|| {
-                    format!("failed while parsing test entry {num} for pkg: {target_pkg}")
-                })?;
-            let (real_status, real_out, real_err) = (
-                output
-                    .status
-                    .code()
-                    .ok_or_else(|| {
-                        anyhow!("failed to parse wait status of tested binary program as exit code")
-                    })
+                let [out, err, rc, run] = [out, err, rc, run]
+                    .into_iter()
+                    .enumerate()
+                    .try_fold(
+                        [const { String::new() }; TEST_PARAMS],
+                        |mut accum, (idx, param)| {
+                            accum[idx] = param.ok_or_else(|| match idx {
+                                0 => anyhow!("failed to find `out` test param"),
+                                1 => anyhow!("failed to find `err` test param"),
+                                2 => anyhow!("failed to find `rc` test param"),
+                                3 => anyhow!("failed to find `run` test param"),
+                                _ => unimplemented!(
+                                    "the test harness is broken, report issues with the pattern \
+                                     matching at the start of `run_tests()`"
+                                ),
+                            })?;
+
+                            anyhow::Ok(accum)
+                        },
+                    )
+                    .with_context(ctx_msg)?;
+
+                let mut program_params = run.split_ascii_whitespace();
+                let bin = program_params
+                    .next()
+                    .ok_or(anyhow!(
+                        "failed to find binary name in `.rc` test file param"
+                    ))
+                    .with_context(ctx_msg)?;
+
+                (bin.trim_start_matches(['.', '/']) == exe)
+                    .ok_or(anyhow!(
+                        "crate binary doesn't match binary in `.run` test file param"
+                    ))
                     .with_context(|| {
-                        format!("failed while parsing test entry {num} for pkg: {target_pkg}")
-                    })?,
-                String::from_utf8_lossy_owned(output.stdout),
-                String::from_utf8_lossy_owned(output.stderr),
-            );
-            (status == real_status)
-                .ok_or(anyhow!(
-                    "test exit status doesn't match expected exit status"
-                ))
-                .with_context(|| {
-                    format!("\ntest exit status: {real_status}\nexpected: {status}")
-                })?;
-            (out == real_out)
-                .ok_or(anyhow!("test stdout doesn't match expected stdout"))
-                .with_context(|| format!("\ntest stdout:\n{real_out}\nexpected:\n{out}"))?;
-            (err == real_err)
-                .ok_or(anyhow!("test stderr doesn't match expected stderr"))
-                .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"))?;
-            println!("sucess\n---");
+                        format!("crate binary: {exe}, binary name in `.run` test file param: {bin}")
+                    })?;
 
-            anyhow::Ok(())
+                let output = Command::new(bin).args(program_params).output().await?;
+                let status = rc
+                    .trim()
+                    .parse::<i32>()
+                    .context("failed to parse return code in `.rc` test file param")
+                    .with_context(ctx_msg)?;
+
+                let (real_status, real_out, real_err) = (
+                    output
+                        .status
+                        .code()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "failed to parse wait status of tested binary program as exit code"
+                            )
+                        })
+                        .with_context(ctx_msg)?,
+                    ByteStr::new(&output.stdout),
+                    ByteStr::new(&output.stderr),
+                );
+
+                (status == real_status)
+                    .ok_or(anyhow!(
+                        "test exit status doesn't match expected exit status"
+                    ))
+                    .with_context(|| {
+                        format!("\ntest exit status: {real_status}\nexpected: {status}")
+                    })?;
+
+                (out.as_bytes() == real_out)
+                    .ok_or(anyhow!("test stdout doesn't match expected stdout"))
+                    .with_context(|| format!("\ntest stdout:\n{real_out}\nexpected:\n{out}"))?;
+
+                (err.as_bytes() == real_err)
+                    .ok_or(anyhow!("test stderr doesn't match expected stderr"))
+                    .with_context(|| format!("\ntest stderr:\n{real_err}\nexpected:\n{err}"))?;
+
+                anyhow::Ok(())
+            });
+
+            task_pool
         },
-    )?;
-    println!("all tests passed");
-    cleanup(exe)?;
+    );
 
-    anyhow::Ok(())
+    while let Some(res) = task_pool.join_next().await {
+        // NOTE: we don't provide context to the inner result because that one already
+        // holds the error we added context to inside each task (noone in particular,
+        // whichever one of them all.)
+        res.context("failed to handle some task while running tests")??;
+    }
+
+    cleanup(exe).await?;
+
+    Ok(())
 }
 
-fn cleanup(mut exe: String) -> anyhow::Result<()> {
+pub(crate) async fn cleanup(mut exe: String) -> anyhow::Result<()> {
     exe.insert_str(0, "./");
+
     Command::new("rm")
         .arg(exe)
         .status()
+        .await
         .context("failed to invoke clean up command")?
         .exit_ok()
         .context("failed to clean up testing resources")?;

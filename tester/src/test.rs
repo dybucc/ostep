@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Test {
     pub(crate) num: usize,
     pub(crate) out: Option<String>,

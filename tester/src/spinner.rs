@@ -55,7 +55,7 @@ impl Display for SpinnerState {
 
 pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> anyhow::Result<()> {
     static SYNC_STDOUT: Mutex<LazyLock<SyncStdout>> =
-        Mutex::const_new(LazyLock::new(|| std_io::stdout()));
+        Mutex::const_new(LazyLock::new(std_io::stdout));
 
     async fn report(
         spinner_state: SpinnerState,
@@ -77,13 +77,16 @@ pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> any
 
     let (inner_tx, mut inner_rx) = mpsc::channel(1);
 
-    // NOTE: this returns the result from `spinner_task`, which is the only one for
-    // which we consider failures.
-    future::try_join(
+    // FIXME(refactor): this can likely be refactored into using a single task and
+    // no local channels, as the `try_recv()` method is also available on the `rx`
+    // we get in this async fn.
+    match future::try_join(
         task::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                inner_tx.send(msg).await;
+                inner_tx.send(msg).await?;
             }
+
+            anyhow::Ok(())
         }),
         task::spawn(async move {
             let mut msg = None;
@@ -91,8 +94,8 @@ pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> any
 
             let mut stdout = io::stdout();
 
-            // If there's a new message, it updates the message being output. Otherwise, it
-            // simply reports the current progress message.
+            // NOTE: if there's a new message, it updates the message being output.
+            // Otherwise, it simply reports the current progress message.
             loop {
                 match inner_rx.try_recv() {
                     Ok(new_msg) => {
@@ -108,5 +111,8 @@ pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> any
         }),
     )
     .await?
-    .1
+    {
+        (Err(e), _) | (_, Err(e)) => Err(e),
+        _ => Ok(()),
+    }
 }
