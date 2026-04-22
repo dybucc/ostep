@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["initial-utilities/wcat", "tester"]
+members = ["initial-utilities/wcat", "tester", "tester-impl"]
 
 [workspace.lints.clippy]
 pedantic = "warn"

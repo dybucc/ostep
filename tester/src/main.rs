@@ -49,7 +49,7 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 // one ought parse anything that is not a closure or a macro) and rewrites it
 // such that it goes from this:
 // ```rust
-// tokio::task::spawn_blocking(|| /* do something */).await?;
+// tokio::task::spawn_blocking(|| /* ... */).await?;
 // ```
 // To this:
 // ```rust
@@ -62,13 +62,12 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 // };
 // ```
 // This may require taking everything from `main` into a separate `inner_main`
-// such that the rewrite isn't mixed up with `tokio`'s rewrite of
+// such that the rewrite isn't mixed up with `tokio`'s rewrite when using
 // `[tokio::main]`.
 
-// FIXME(logger): there's somem printing statements that only run under
-// `debug_assertions` which should either use some asynchronous `stderr`
-// printing facility from `tokio`, or that should otherwise be replaced with a
-// proper logger.
+// FIXME(logger): there's some printing statements that only run under
+// `debug_assertions` which should either use some asynchronous `stderr` from
+// `tokio`, or otherwise should be replaced with a proper logger.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -76,8 +75,6 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = mpsc::unbounded_channel();
 
-    // Enable terminal raw mode to allow moving the cursor and rewriting progress
-    // messages in a single line.
     task::spawn_blocking(terminal::enable_raw_mode)
         .await
         .context(INIT_ERR)?
@@ -89,18 +86,12 @@ async fn main() -> anyhow::Result<()> {
     // (2) the worker task that performs all of the testing harness functionality
     //     while occasionally updating the message shown on the spinner.
     match future::try_join(task::spawn(spinner(rx)), task::spawn(worker(tx))).await? {
-        (Err(_), Err(_)) => bail!("fatal failure"),
-        (Err(err), _) => Err(err).context("failed to handle spinner animation"),
+        (err @ Err(_), _) => err.context("failed to handle spinner animation"),
         (_, res) => res,
     }
 }
 
 pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
-    // FIXME(async): `find_tests()` can probably run concurrently with `copy_exe()`.
-    // That would require changing the `try_join()` at the end such that the
-    // `produce_tests()` routine only starts running once the `find_tests()` is done
-    // *and* this main worker task is done sorting the tests. A `oneshot` channel
-    // would be enough here.
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
 
@@ -114,7 +105,7 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
 
     // NOTE: because the below two tasks run concurrently, we prefer not to have
     // them intersperse output from their current progress.
-    tx.send("copying executable to pwd and processing tests".into())
+    tx.send("copying executable to `tests/` and processing tests".into())
         .context(MAIN_RX_ERROR)?;
 
     let (exe, tests) = match future::try_join(copy_exe(&target_pkg), produce_tests(tests)).await {
@@ -204,14 +195,14 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
                 if let Some(path) = manifest_path.parent()
                     && path == pwd
                 {
-                    pkg = Some(workspace_pkg);
+                    pkg = workspace_pkg.into();
                     break;
                 }
 
                 if let Some(cli_name) = &cli_pkg
                     && *cli_name == **name
                 {
-                    pkg = Some(workspace_pkg);
+                    pkg = workspace_pkg.into();
                     break;
                 }
             }
@@ -366,46 +357,53 @@ pub(crate) async fn find_tests(
 pub(crate) async fn produce_tests(
     tests: Vec<(PathBuf, usize, OsString)>,
 ) -> anyhow::Result<Vec<Test>> {
-    let mut task_pool = JoinSet::new();
+    tests
+        .into_iter()
+        .fold(
+            JoinSet::new(),
+            |mut task_pool, (test_path, _, test_extension)| {
+                task_pool.spawn(async move {
+                    let mut test = Test::default();
 
-    for (test_path, _, test_extension) in tests {
-        task_pool.spawn(async move {
-            let mut test = Test::default();
+                    macro_rules! check_entry {
+                        ($test:expr) => {{
+                            let ctx_msg = || {
+                                format!(
+                                    "failed while parsing `tests` directory entry `{}`",
+                                    $test.display()
+                                )
+                            };
 
-            macro_rules! check_entry {
-                ($test:expr) => {{
-                    let ctx_msg = || {
-                        format!(
-                            "failed while parsing `tests` directory entry `{}`",
-                            $test.display()
-                        )
-                    };
+                            fs::read_to_string(
+                                fs::canonicalize(&$test).await.with_context(ctx_msg)?,
+                            )
+                            .await
+                            .with_context(ctx_msg)?
+                            .into()
+                        }};
+                    }
 
-                    fs::read_to_string(fs::canonicalize(&$test).await.with_context(ctx_msg)?)
-                        .await
-                        .with_context(ctx_msg)?
-                        .into()
-                }};
-            }
+                    match test_extension.as_encoded_bytes() {
+                        b"rc" => test.rc = check_entry!(test_path),
+                        b"out" => test.out = check_entry!(test_path),
+                        b"err" => test.err = check_entry!(test_path),
+                        b"run" => test.run = check_entry!(test_path),
+                        b"desc" => test.desc = check_entry!(test_path),
+                        b"pre" => test.pre = check_entry!(test_path),
+                        b"post" => test.post = check_entry!(test_path),
+                        _ => {
+                            unreachable!(
+                                "all other file extensions have been filtered past `find_tests()`"
+                            )
+                        }
+                    }
 
-            match test_extension.as_encoded_bytes() {
-                b"rc" => test.rc = check_entry!(test_path),
-                b"out" => test.out = check_entry!(test_path),
-                b"err" => test.err = check_entry!(test_path),
-                b"run" => test.run = check_entry!(test_path),
-                b"desc" => test.desc = check_entry!(test_path),
-                b"pre" => test.pre = check_entry!(test_path),
-                b"post" => test.post = check_entry!(test_path),
-                _ => {
-                    unreachable!("all other file extensions have been filtered past `find_tests()`")
-                }
-            }
+                    anyhow::Ok(test)
+                });
 
-            Ok(test)
-        });
-    }
-
-    task_pool
+                task_pool
+            },
+        )
         .join_all()
         .await
         .into_iter()
@@ -428,11 +426,10 @@ pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
                 ControlFlow::Break(output)
             },
         )
-        .try_reduce(String::new, |a, b| {
-            let mut out = a.into_bytes();
-            out.append(&mut b.into_bytes());
+        .try_reduce(String::new, |mut a, b| {
+            a.push_str(&b);
 
-            ControlFlow::Continue(String::from_utf8_lossy_owned(out))
+            ControlFlow::Continue(a)
         })
         .into_value();
 
@@ -465,15 +462,15 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<Strin
         String::from_utf8_lossy_owned(cmd_stdout.clone())
     );
 
-    let preprocessed_json = task::spawn_blocking(move || preprocess_build_json(cmd_stdout))
-        .await
-        .context("failed to handle task managing cargo build json parsing")?;
-
     // NOTE: we don't encode the `executable` key of the json because it's part of
     // the stability guarantees in cargo's output.
-    let exe = if let Value::Object(map) = serde_json::from_str(&preprocessed_json)
-        .context("failed to parse json output from `cargo-build`")
-        .with_context(ctx_msg)?
+    let exe = if let Value::Object(map) = serde_json::from_str(
+        &task::spawn_blocking(move || preprocess_build_json(cmd_stdout))
+            .await
+            .context("failed to handle task managing cargo build json parsing")?,
+    )
+    .context("failed to parse json output from `cargo-build`")
+    .with_context(ctx_msg)?
         && let Some(Value::String(s)) = map.get("executable")
     {
         Ok(PathBuf::from(s))
@@ -505,7 +502,7 @@ pub(crate) async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -
 where
     for<'a> T: 'a + Display + Send + Sync + Clone,
 {
-    // FIXME(refactor): chanage the below constant if you ever start parsing more
+    // FIXME(refactor): change the below constant if you ever start parsing more
     // info from the `Test` structure.
     const TEST_PARAMS: usize = 4;
 
@@ -615,7 +612,7 @@ where
 
     while let Some(res) = task_pool.join_next().await {
         // NOTE: we don't provide context to the inner result because that one already
-        // holds the error we added context to inside each task (noone in particular,
+        // holds the error we added context to inside each task (none in particular,
         // whichever one of them all.)
         res.context("failed to handle some task while running tests")??;
     }

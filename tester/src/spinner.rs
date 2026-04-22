@@ -10,12 +10,11 @@ use crossterm::{
     cursor::MoveToColumn,
     terminal::{Clear, ClearType},
 };
-use futures::future;
 use tokio::{
-    io::{self, AsyncWriteExt as _, Stdout},
+    io::{self, AsyncWriteExt, Stdout},
     sync::{
         Mutex,
-        mpsc::{self, UnboundedReceiver, error::TryRecvError},
+        mpsc::{UnboundedReceiver, error::TryRecvError},
     },
     task,
 };
@@ -67,52 +66,36 @@ pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> any
         task::spawn_blocking(move || {
             crossterm::execute!(sync_stdout, Clear(ClearType::CurrentLine), MoveToColumn(0))
         })
-        .await??;
+        .await
+        .context("failed to manage task to clear line and move cursor")?
+        .context("failed to clear line and move cursor")?;
 
         stdout
             .write_all(&format!("{} {}", spinner_state, msg.as_ref()).into_bytes())
             .await
-            .map_err(Into::into)
+            .context("failed to print out spinner state through async stdout")
     }
 
-    let (inner_tx, mut inner_rx) = mpsc::channel(1);
+    let mut msg = None;
+    let mut spinner = SpinnerState::default();
 
-    // FIXME(refactor): this can likely be refactored into using a single task and
-    // no local channels, as the `try_recv()` method is also available on the `rx`
-    // we get in this async fn.
-    match future::try_join(
-        task::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                inner_tx.send(msg).await?;
+    let mut stdout = io::stdout();
+
+    // NOTE: if there's a new message, it updates the message being output.
+    // Otherwise, it simply reports the current progress message. This relies on the
+    // fact the throughput of the channel can't stress this loop so much so as to
+    // never print certain messages.
+    loop {
+        match rx.try_recv() {
+            Ok(new_msg) => {
+                spinner.next();
+                msg = new_msg.into();
             }
-
-            anyhow::Ok(())
-        }),
-        task::spawn(async move {
-            let mut msg = None;
-            let mut spinner = SpinnerState::default();
-
-            let mut stdout = io::stdout();
-
-            // NOTE: if there's a new message, it updates the message being output.
-            // Otherwise, it simply reports the current progress message.
-            loop {
-                match inner_rx.try_recv() {
-                    Ok(new_msg) => {
-                        spinner.next();
-                        msg = new_msg.into();
-                    }
-                    Err(TryRecvError::Disconnected) => break anyhow::Ok(()),
-                    Err(_) => report(spinner, msg.as_ref().unwrap(), &mut stdout)
-                        .await
-                        .context("failed while updating spinner messages")?,
-                }
-            }
-        }),
-    )
-    .await?
-    {
-        (Err(e), _) | (_, Err(e)) => Err(e),
-        _ => Ok(()),
+            Err(TryRecvError::Disconnected) => break anyhow::Ok(()),
+            Err(_) if msg.is_none() => (),
+            Err(_) => report(spinner, msg.as_ref().unwrap(), &mut stdout)
+                .await
+                .context("failed while updating spinner messages")?,
+        }
     }
 }
