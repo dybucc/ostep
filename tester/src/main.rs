@@ -29,6 +29,7 @@ use rayon::{
 };
 use serde_json::Value;
 use tester::{args::Args, spinner::spinner, test::Test};
+use tester_impl::add;
 use tokio::{
     fs,
     process::Command,
@@ -42,28 +43,6 @@ mod spinner;
 mod test;
 
 const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
-
-// FIXME: write a proc-macro that scans a function for its return value, checks
-// if it's a `Result`, and if it is, then it parses its body and rewrites each
-// fallible function callsite that is annotated with `?` (taking into account
-// one ought parse anything that is not a closure or a macro) and rewrites it
-// such that it goes from this:
-// ```rust
-// tokio::task::spawn_blocking(|| /* ... */).await?;
-// ```
-// To this:
-// ```rust
-// {
-//     let res = tokio::task::spawn_blocking(|| /* do something */).await
-//     if res.is_err() && crossterm::terminal::is_raw_mode_enabled() {
-//         tokio::task::spawn_blocking(|| terminal::disable_raw_mode()).await.unwrap();
-//         res?
-//     };
-// };
-// ```
-// This may require taking everything from `main` into a separate `inner_main`
-// such that the rewrite isn't mixed up with `tokio`'s rewrite when using
-// `[tokio::main]`.
 
 // FIXME(logger): there's some printing statements that only run under
 // `debug_assertions` which should either use some asynchronous `stderr` from
@@ -91,6 +70,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+// TODO: keep looking into why is it that the proc-macro expansion doesn't work.
+#[add]
 pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
