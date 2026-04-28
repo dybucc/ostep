@@ -14,6 +14,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fmt::Display,
+    fs::Metadata,
     ops::ControlFlow,
     path::PathBuf,
 };
@@ -22,14 +23,14 @@ use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{MetadataCommand, Package};
 use clap::Parser;
 use crossterm::terminal;
-use futures::{StreamExt as _, future};
+use futures::{StreamExt, future};
 use rayon::{
     iter::{IntoParallelIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
 use serde_json::Value;
 use tester::{args::Args, spinner::spinner, test::Test};
-use tester_impl::add;
+use tester_impl::defer_drm;
 use tokio::{
     fs,
     process::Command,
@@ -70,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-// TODO: keep looking into why is it that the proc-macro expansion doesn't work.
-#[add]
+#[defer_drm]
 pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
@@ -85,7 +85,8 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     .context("failed to handle blocking task to sort tests by entry number")?;
 
     // NOTE: because the below two tasks run concurrently, we prefer not to have
-    // them intersperse output from their current progress.
+    // them intersperse output so for now we only report the tasks that are about to
+    // be made.
     tx.send("copying executable to `tests/` and processing tests".into())
         .context(MAIN_RX_ERROR)?;
 
@@ -99,6 +100,7 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     run_tests(exe, tests, target_pkg).await
 }
 
+#[defer_drm]
 pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
     // NOTE: this gets used at the end once a matching package has been found, to
     // both set the pwd to that package's manifest path, and to return the package's
@@ -164,31 +166,38 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     // package we can default to.
     match workspace_packages.len() {
         2.. => {
-            let cli_pkg = Args::parse().package;
-            let mut pkg = None;
+            // NOTE: if we got issued a package name, we ought prioritize finding a package
+            // of that name, before attempting to fall back to the package that we may be at
+            // in the current working directory.
+            if let Some(pkg) = if let Some(cli_name) = Args::parse().package {
+                workspace_packages
+                    .iter()
+                    .try_fold(
+                        None,
+                        |mut fallback_pwd,
+                         pkg @ Package {
+                             name,
+                             manifest_path,
+                             ..
+                         }| {
+                            if cli_name == **name {
+                                return ControlFlow::Break(pkg);
+                            }
 
-            for workspace_pkg @ Package {
-                name,
-                manifest_path,
-                ..
-            } in &workspace_packages
-            {
-                if let Some(path) = manifest_path.parent()
-                    && path == pwd
-                {
-                    pkg = workspace_pkg.into();
-                    break;
-                }
+                            if *manifest_path == pwd {
+                                fallback_pwd = pkg.into();
+                            }
 
-                if let Some(cli_name) = &cli_pkg
-                    && *cli_name == **name
-                {
-                    pkg = workspace_pkg.into();
-                    break;
-                }
-            }
-
-            if let Some(pkg) = pkg {
+                            ControlFlow::Continue(fallback_pwd)
+                        },
+                    )
+                    .map_break(Some)
+                    .into_value()
+            } else {
+                workspace_packages
+                    .iter()
+                    .find(|Package { manifest_path, .. }| *manifest_path == pwd)
+            } {
                 finalize(*pkg)
             } else {
                 bail!(
@@ -202,6 +211,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     }
 }
 
+#[defer_drm]
 pub(crate) async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
@@ -258,86 +268,95 @@ pub(crate) async fn find_tests(
     let tasks_result = task_pool.join_all().await;
 
     // NOTE: the following performs a parallel fold of the above task results, such
-    // that having put aside the operations that benefit from asynchronicity
-    // (i.e. fetching file metadata,) the only thing left is to gather into a
-    // single accumulator value all of the parsed tests, if they haven't failed
-    // during such asyncrhonous I/O. We specifically gather 3-element tuples
-    // consisting of the path to the test file, the entry number of the test and
-    // the test type (which itself depends on the test path's file stem's
-    // extension.)
-    task::spawn_blocking(move || {
-        tasks_result
-            .into_par_iter()
-            .try_fold(
-                || Vec::with_capacity(speculative_cap),
-                |mut accum, result| {
-                    match result {
-                        Ok((path, metadata)) => {
-                            if metadata.is_file()
-                                && let Some(entry_extension) = path.extension()
-                                && matches!(
-                                    entry_extension.as_encoded_bytes(),
-                                    b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
-                                )
-                            {
-                                let num = path
-                                    .file_stem()
-                                    .ok_or(anyhow!("file doesn't contain file stem"))
-                                    .context(
-                                        "expected file stem to be a numeric value denoting the \
-                                         test",
-                                    )
-                                    .with_context(|| {
-                                        format!(
-                                            "failed when parsing `tests` directory entry: `{}`",
-                                            path.display()
-                                        )
-                                    })?
-                                    .to_str()
-                                    .ok_or(anyhow!("file contains non-utf8 codepoints"))
-                                    .context(
-                                        "expected utf-8-compliant values for each test; each test \
-                                         should denote a numeric value",
-                                    )
-                                    .with_context(|| {
-                                        format!(
-                                            "failed when parsing `tests` directory entry: `{}`",
-                                            path.display()
-                                        )
-                                    })?
-                                    .parse::<usize>()
-                                    .context("expected file to denote a test number in the suite")
-                                    .with_context(|| {
-                                        format!(
-                                            "failed when parsing `tests` directory entry: `{}`",
-                                            path.display()
-                                        )
-                                    })?;
-
-                                let extension = entry_extension.to_os_string();
-
-                                accum.push((path, num, extension));
-                            }
-                        }
-                        Err(err) => return Err(err),
-                    }
-
-                    Ok(accum)
-                },
-            )
-            .try_reduce(Vec::new, |mut a, mut b| {
-                a.append(&mut b);
-
-                Ok(a)
-            })
-    })
-    .await
-    .context("failed to handle task to manage test entry parsing")?
+    // that having put aside the operations that benefit from asynchronicity (i.e.
+    // fetching file metadata,) the only thing left is to gather into a single
+    // accumulator value all of the parsed tests, if they haven't failed during such
+    // asynchronous I/O. We specifically gather 3-element tuples consisting of the
+    // path to the test file, the entry number of the test and the test type (which
+    // itself depends on the test path's file stem's extension.)
+    task::spawn_blocking(move || proc_tests(tasks_result, speculative_cap))
+        .await
+        .context("failed to handle task to manage test entry parsing")?
 }
 
+pub(crate) fn proc_tests(
+    tasks_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
+    init_cap: usize,
+) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
+    tasks_result
+        .into_par_iter()
+        .try_fold(
+            || Vec::with_capacity(init_cap),
+            |mut accum, result| {
+                match result {
+                    Ok((path, metadata)) => {
+                        if metadata.is_file()
+                            && let Some(entry_extension) = path.extension()
+                            && matches!(
+                                entry_extension.as_encoded_bytes(),
+                                b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
+                            )
+                        {
+                            let num = path
+                                .file_stem()
+                                .ok_or(anyhow!("file doesn't contain file stem"))
+                                .context(
+                                    "expected file stem to be a numeric value denoting the test",
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "failed when parsing `tests` directory entry: `{}`",
+                                        path.display()
+                                    )
+                                })?
+                                .to_str()
+                                .ok_or(anyhow!("file contains non-utf8 codepoints"))
+                                .context(
+                                    "expected utf-8-compliant values for each test; each test \
+                                     should denote a numeric value",
+                                )
+                                .with_context(|| {
+                                    format!(
+                                        "failed when parsing `tests` directory entry: `{}`",
+                                        path.display()
+                                    )
+                                })?
+                                .parse::<usize>()
+                                .context("expected file to denote a test number in the suite")
+                                .with_context(|| {
+                                    format!(
+                                        "failed when parsing `tests` directory entry: `{}`",
+                                        path.display()
+                                    )
+                                })?;
+
+                            let extension = entry_extension.to_os_string();
+
+                            accum.push((path, num, extension));
+                        }
+                    }
+                    Err(err) => return Err(err),
+                }
+
+                Ok(accum)
+            },
+        )
+        .try_reduce(Vec::new, |mut a, mut b| {
+            a.append(&mut b);
+
+            Ok(a)
+        })
+}
+
+#[defer_drm]
 pub(crate) async fn produce_tests(
     tests: Vec<(PathBuf, usize, OsString)>,
 ) -> anyhow::Result<Vec<Test>> {
+    // TODO: maybe it's not worth it to await all results in the task pool, as each
+    // incoming done task could be awaited individually to propagate it if it's an
+    // error. There's likely no need to have it all awaited, and as soon as an error
+    // is received, all other tasks can be cancelled.
+
     tests
         .into_iter()
         .fold(
