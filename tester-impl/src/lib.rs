@@ -10,8 +10,12 @@ mod result_fn;
 
 pub(crate) use crate::{expand::handle_block, result_fn::ResultFn};
 
-/// Defer the execution of disabling terminal raw mode by rewriting the routine,
-/// and not relying on destructors for a defer object being run.
+/// Defer the execution of disabling terminal raw mode by rewriting the routine
+/// at fallible points of execution (i.e. `?`-annotated expressions.)
+///
+/// This is an alternative to defer objects where running the destructor may not
+/// always be guaranteed if the executable object panics with a non-unwinding
+/// strategy.
 #[proc_macro_attribute]
 pub fn defer_drm(params: TokenStream, func: TokenStream) -> TokenStream {
     if !params.is_empty() {

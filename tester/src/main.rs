@@ -49,6 +49,7 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 // `debug_assertions` which should either use some asynchronous `stderr` from
 // `tokio`, or otherwise should be replaced with a proper logger.
 
+#[tracing::instrument(skip_all)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     const INIT_ERR: &str = "failed to complete init terminal raw mode task";
@@ -71,18 +72,11 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[defer_drm]
 pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
-
-    let tests = task::spawn_blocking(move || {
-        tests.par_sort_unstable_by_key(|&(_, test_num, _)| test_num);
-
-        tests
-    })
-    .await
-    .context("failed to handle blocking task to sort tests by entry number")?;
 
     // NOTE: because the below two tasks run concurrently, we prefer not to have
     // them intersperse output so for now we only report the tasks that are about to
@@ -90,16 +84,32 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
     tx.send("copying executable to `tests/` and processing tests".into())
         .context(MAIN_RX_ERROR)?;
 
-    let (exe, tests) = match future::try_join(copy_exe(&target_pkg), produce_tests(tests)).await {
-        Ok(inner) => inner,
-        Err(err) => return Err(err),
+    let (tests, exe) = match future::try_join(
+        task::spawn_blocking(move || {
+            tests.par_sort_unstable_by_key(|&(_, test_num, _)| test_num);
+
+            tests
+        }),
+        task::spawn(copy_exe(target_pkg.clone())),
+    )
+    .await
+    {
+        Ok((tests, Ok(exe))) => (tests, exe),
+        Ok((_, Err(copy_err))) => bail!(copy_err),
+        Err(task_err) => {
+            return Err(task_err)
+                .context("failed to handle blocking task to sort tests by entry number");
+        }
     };
+
+    let tests = produce_tests(tests).await?;
 
     tx.send("running tests".into()).context(MAIN_RX_ERROR)?;
 
     run_tests(exe, tests, target_pkg).await
 }
 
+#[tracing::instrument(skip_all)]
 #[defer_drm]
 pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
     // NOTE: this gets used at the end once a matching package has been found, to
@@ -211,6 +221,7 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     }
 }
 
+#[tracing::instrument(skip_all)]
 #[defer_drm]
 pub(crate) async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
@@ -279,6 +290,7 @@ pub(crate) async fn find_tests(
         .context("failed to handle task to manage test entry parsing")?
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn proc_tests(
     tasks_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
     init_cap: usize,
@@ -348,68 +360,62 @@ pub(crate) fn proc_tests(
         })
 }
 
+#[tracing::instrument(skip_all)]
 #[defer_drm]
 pub(crate) async fn produce_tests(
     tests: Vec<(PathBuf, usize, OsString)>,
 ) -> anyhow::Result<Vec<Test>> {
-    // TODO: maybe it's not worth it to await all results in the task pool, as each
-    // incoming done task could be awaited individually to propagate it if it's an
-    // error. There's likely no need to have it all awaited, and as soon as an error
-    // is received, all other tasks can be cancelled.
+    let mut task_pool = JoinSet::new();
 
-    tests
-        .into_iter()
-        .fold(
-            JoinSet::new(),
-            |mut task_pool, (test_path, _, test_extension)| {
-                task_pool.spawn(async move {
-                    let mut test = Test::default();
+    let num_tests = tests.len();
 
-                    macro_rules! check_entry {
-                        ($test:expr) => {{
-                            let ctx_msg = || {
-                                format!(
-                                    "failed while parsing `tests` directory entry `{}`",
-                                    $test.display()
-                                )
-                            };
+    for (test_path, _, test_extension) in tests {
+        task_pool.spawn(async move {
+            let mut test = Test::default();
 
-                            fs::read_to_string(
-                                fs::canonicalize(&$test).await.with_context(ctx_msg)?,
-                            )
-                            .await
-                            .with_context(ctx_msg)?
-                            .into()
-                        }};
-                    }
+            macro_rules! check_entry {
+                ($test:expr) => {{
+                    let ctx_msg = || {
+                        format!(
+                            "failed while parsing `tests` directory entry `{}`",
+                            $test.display()
+                        )
+                    };
 
-                    match test_extension.as_encoded_bytes() {
-                        b"rc" => test.rc = check_entry!(test_path),
-                        b"out" => test.out = check_entry!(test_path),
-                        b"err" => test.err = check_entry!(test_path),
-                        b"run" => test.run = check_entry!(test_path),
-                        b"desc" => test.desc = check_entry!(test_path),
-                        b"pre" => test.pre = check_entry!(test_path),
-                        b"post" => test.post = check_entry!(test_path),
-                        _ => {
-                            unreachable!(
-                                "all other file extensions have been filtered past `find_tests()`"
-                            )
-                        }
-                    }
+                    fs::read_to_string(fs::canonicalize(&$test).await.with_context(ctx_msg)?)
+                        .await
+                        .with_context(ctx_msg)?
+                        .into()
+                }};
+            }
 
-                    anyhow::Ok(test)
-                });
+            match test_extension.as_encoded_bytes() {
+                b"rc" => test.rc = check_entry!(test_path),
+                b"out" => test.out = check_entry!(test_path),
+                b"err" => test.err = check_entry!(test_path),
+                b"run" => test.run = check_entry!(test_path),
+                b"desc" => test.desc = check_entry!(test_path),
+                b"pre" => test.pre = check_entry!(test_path),
+                b"post" => test.post = check_entry!(test_path),
+                _ => {
+                    unreachable!("all other file extensions have been filtered past `find_tests()`")
+                }
+            }
 
-                task_pool
-            },
-        )
-        .join_all()
-        .await
-        .into_iter()
-        .collect::<anyhow::Result<Vec<_>>>()
+            anyhow::Ok(test)
+        });
+    }
+
+    let mut out = Vec::with_capacity(num_tests);
+
+    while let Some(res) = task_pool.join_next().await {
+        out.push(res.context("failed to handle task management while reading test files")??);
+    }
+
+    Ok(out)
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
     let len = input.len();
 
@@ -418,12 +424,13 @@ pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
         .try_fold(
             || String::with_capacity(len),
             |mut output, b| {
-                if b != b'\n' {
-                    output.push(char::from(b));
-                    return ControlFlow::Continue(output);
+                if b == b'\n' {
+                    return ControlFlow::Break(output);
                 }
 
-                ControlFlow::Break(output)
+                output.push(char::from(b));
+
+                ControlFlow::Continue(output)
             },
         )
         .try_reduce(String::new, |mut a, b| {
@@ -440,7 +447,9 @@ pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
     out
 }
 
-pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<String> {
+#[tracing::instrument(skip_all)]
+#[defer_drm]
+pub(crate) async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
     let ctx_msg =
         || format!("failed while trying to build binary for cargo workspace package: {target_pkg}");
 
@@ -462,8 +471,8 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<Strin
         String::from_utf8_lossy_owned(cmd_stdout.clone())
     );
 
-    // NOTE: we don't encode the `executable` key of the json because it's part of
-    // the stability guarantees in cargo's output.
+    // NOTE: we don't encode the `executable` key of the JSON in a type nor constant
+    // because it's part of the stability guarantees in cargo's output.
     let exe = if let Value::Object(map) = serde_json::from_str(
         &task::spawn_blocking(move || preprocess_build_json(cmd_stdout))
             .await
@@ -471,9 +480,9 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<Strin
     )
     .context("failed to parse json output from `cargo-build`")
     .with_context(ctx_msg)?
-        && let Some(Value::String(s)) = map.get("executable")
+        && let Some(Value::String(exe)) = map.get("executable")
     {
-        Ok(PathBuf::from(s))
+        Ok(PathBuf::from(exe))
     } else {
         Err(anyhow!(
             "failed to find `executable` entry in cargo build json output"
@@ -498,6 +507,8 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: &T) -> anyhow::Result<Strin
     ))
 }
 
+#[tracing::instrument(skip_all)]
+#[defer_drm]
 pub(crate) async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
 where
     for<'a> T: 'a + Display + Send + Sync + Clone,
@@ -521,12 +532,8 @@ where
             let target_pkg = target_pkg.clone();
 
             task_pool.spawn(async move {
-                let ctx_msg = || {
-                    format!(
-                        "failed while parsing test entry {num} for pkg: {}",
-                        target_pkg.clone()
-                    )
-                };
+                let ctx_msg =
+                    || format!("failed while parsing test entry {num} for pkg: {target_pkg}");
 
                 let [out, err, rc, run] = [out, err, rc, run]
                     .into_iter()
@@ -540,8 +547,8 @@ where
                                 2 => anyhow!("failed to find `rc` test param"),
                                 3 => anyhow!("failed to find `run` test param"),
                                 _ => unimplemented!(
-                                    "the test harness is broken, report issues with the pattern \
-                                     matching at the start of `run_tests()`"
+                                    "the test harness is broken, report to the issue tracker \
+                                     about the pattern matching at the start of `run_tests()`"
                                 ),
                             })?;
 
@@ -622,6 +629,7 @@ where
     Ok(())
 }
 
+#[defer_drm]
 pub(crate) async fn cleanup(mut exe: String) -> anyhow::Result<()> {
     exe.insert_str(0, "./");
 
