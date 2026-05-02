@@ -30,10 +30,10 @@ impl Parse for ResultFn {
             input.error("this attribute should only annotate functions returning `anyhow::Result`")
         })?;
 
-        // NOTE: this triggers the process of dual recursion that starts with the
+        // NOTE: this triggers the process of interleaved recursion that starts with the
         // function block and processes all expressions within it, including other
         // blocks, but excluding scopes that would not propagate immediately to the
-        // function (e.g. the body of a closure.)
+        // function (e.g. the body of a closure or an async block.)
         handle_block(block);
 
         Ok(Self(func))

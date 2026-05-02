@@ -6,8 +6,6 @@
     bstr
 )]
 
-extern crate self as tester;
-
 use std::{
     borrow::{Borrow, Cow},
     bstr::ByteStr,
@@ -29,7 +27,6 @@ use rayon::{
     slice::ParallelSliceMut,
 };
 use serde_json::Value;
-use tester::{args::Args, spinner::spinner, test::Test};
 use tester_impl::defer_drm;
 use tokio::{
     fs,
@@ -39,6 +36,8 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReadDirStream;
 
+use crate::{args::Args, spinner::spinner, test::Test};
+
 mod args;
 mod spinner;
 mod test;
@@ -47,7 +46,7 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 
 // FIXME(logger): there's some printing statements that only run under
 // `debug_assertions` which should either use some asynchronous `stderr` from
-// `tokio`, or otherwise should be replaced with a proper logger.
+// `tokio`, or should otherwise be replaced with a proper logger.
 
 #[tracing::instrument(skip_all)]
 #[tokio::main]
