@@ -35,6 +35,7 @@ use tokio::{
     task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
+use tracing::subscriber;
 
 use crate::{args::Args, spinner::spinner, test::Test};
 
@@ -52,6 +53,23 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     const INIT_ERR: &str = "failed to complete init terminal raw mode task";
+
+    // NOTE: the ideal method here would have been the `try_init()` method on the
+    // subscriber builder's own impl, but that returns an error type that, even
+    // though odd, is not convertible to `anyhow::Error`. This should not happen as
+    // the errot type in question is a trait object with `std::error::Error` trait
+    // as the target trait.
+    #[cfg(trace)]
+    subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(true)
+            .with_target(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_level(true)
+            .pretty()
+            .finish(),
+    )?;
 
     let (tx, rx) = mpsc::unbounded_channel();
 
