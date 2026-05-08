@@ -1,3 +1,5 @@
+use build_rs::output;
+
 fn main() {
-    println!("cargo::rustc-check-cfg=cfg(trace, values(none()))");
+    output::rustc_check_cfgs(&["trace"]);
 }

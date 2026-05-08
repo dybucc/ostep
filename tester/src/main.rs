@@ -12,9 +12,10 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fmt::Display,
-    fs::Metadata,
+    fs::{File, Metadata},
     ops::ControlFlow,
     path::PathBuf,
+    sync::Mutex,
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -35,7 +36,7 @@ use tokio::{
     task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
-use tracing::subscriber;
+use tracing::{info, subscriber};
 
 use crate::{args::Args, spinner::spinner, test::Test};
 
@@ -54,22 +55,22 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 async fn main() -> anyhow::Result<()> {
     const INIT_ERR: &str = "failed to complete init terminal raw mode task";
 
-    // NOTE: the ideal method here would have been the `try_init()` method on the
-    // subscriber builder's own impl, but that returns an error type that, even
-    // though odd, is not convertible to `anyhow::Error`. This should not happen as
-    // the errot type in question is a trait object with `std::error::Error` trait
-    // as the target trait.
-    #[cfg(trace)]
-    subscriber::set_global_default(
-        tracing_subscriber::fmt()
-            .with_ansi(true)
-            .with_target(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_level(true)
-            .pretty()
-            .finish(),
-    )?;
+    if cfg!(trace) {
+        subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_ansi(true)
+                .with_target(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_level(true)
+                .with_writer(Mutex::new(
+                    File::create_new(env::current_dir().map(|pwd| pwd.join("debug.log")).unwrap())
+                        .unwrap(),
+                ))
+                .pretty()
+                .finish(),
+        )?;
+    }
 
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -91,14 +92,17 @@ async fn main() -> anyhow::Result<()> {
 
 #[tracing::instrument(skip_all)]
 #[defer_drm]
-pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
+async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
+    info!(target_pkg = target_pkg);
+
     let mut tests = find_tests(tx.clone()).await?;
+    info!(tests = ?tests);
 
     // NOTE: because the below two tasks run concurrently, we prefer not to have
-    // them intersperse output so for now we only report the tasks that are about to
-    // be made.
-    tx.send("copying executable to `tests/` and processing tests".into())
+    // them intersperse output so for now we only report the work about to be made,
+    // but nothing from within those routines.
+    tx.send("copying executable to `tests/` and parsing tests".into())
         .context(MAIN_RX_ERROR)?;
 
     let (tests, exe) = match future::try_join(
@@ -119,16 +123,16 @@ pub(crate) async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Re
         }
     };
 
+    tx.send("generating tests".into()).context(MAIN_RX_ERROR)?;
     let tests = produce_tests(tests).await?;
 
     tx.send("running tests".into()).context(MAIN_RX_ERROR)?;
-
     run_tests(exe, tests, target_pkg).await
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, ret, err(level = "info"))]
 #[defer_drm]
-pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
+async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
     // NOTE: this gets used at the end once a matching package has been found, to
     // both set the pwd to that package's manifest path, and to return the package's
     // name.
@@ -176,6 +180,8 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     .context("failed to parse output of `cargo metadata`")
     .context(ERR_MSG)?;
 
+    info!(workspace_metadata = ?workspace_metadata);
+
     let workspace_packages = workspace_metadata.workspace_packages();
 
     let pwd = env::current_dir()
@@ -207,7 +213,9 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
                              manifest_path,
                              ..
                          }| {
-                            if cli_name == **name {
+                            info!(discovered_pkg = ?pkg);
+
+                            if *name == cli_name {
                                 return ControlFlow::Break(pkg);
                             }
 
@@ -238,9 +246,9 @@ pub(crate) async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, ret, err(level = "info"))]
 #[defer_drm]
-pub(crate) async fn find_tests(
+async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
     tx.send("parsing tests".into()).context(MAIN_RX_ERROR)?;
@@ -263,6 +271,8 @@ pub(crate) async fn find_tests(
     while let Some(dir_entry) = dir_stream.next().await {
         match dir_entry {
             Ok(entry) => {
+                info!(test_entry = %entry.path().display());
+
                 speculative_cap += 1;
 
                 // NOTE: we divide up the tasks here without performing the full processing that
@@ -307,15 +317,18 @@ pub(crate) async fn find_tests(
         .context("failed to handle task to manage test entry parsing")?
 }
 
-#[tracing::instrument(skip_all)]
-pub(crate) fn proc_tests(
+// TODO: finish annotating this and later functions with the corresponding
+// `tracing` event macros. Don't forget about the other modules (especially the
+// `spinner` modulel)
+#[tracing::instrument(skip_all, ret, err(level = "info"))]
+fn proc_tests(
     tasks_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
-    init_cap: usize,
+    capacity: usize,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
     tasks_result
         .into_par_iter()
         .try_fold(
-            || Vec::with_capacity(init_cap),
+            || Vec::with_capacity(capacity),
             |mut accum, result| {
                 match result {
                     Ok((path, metadata)) => {
@@ -326,6 +339,8 @@ pub(crate) fn proc_tests(
                                 b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
                             )
                         {
+                            info!(valid_test_fd = true, test_fd = %path.display());
+
                             let num = path
                                 .file_stem()
                                 .ok_or(anyhow!("file doesn't contain file stem"))
@@ -377,11 +392,9 @@ pub(crate) fn proc_tests(
         })
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, ret, err(level = "info"))]
 #[defer_drm]
-pub(crate) async fn produce_tests(
-    tests: Vec<(PathBuf, usize, OsString)>,
-) -> anyhow::Result<Vec<Test>> {
+async fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> anyhow::Result<Vec<Test>> {
     let mut task_pool = JoinSet::new();
 
     let num_tests = tests.len();
@@ -432,8 +445,8 @@ pub(crate) async fn produce_tests(
     Ok(out)
 }
 
-#[tracing::instrument(skip_all)]
-pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
+#[tracing::instrument(skip_all, ret)]
+fn preprocess_build_json(input: Vec<u8>) -> String {
     let len = input.len();
 
     let out = input
@@ -464,9 +477,9 @@ pub(crate) fn preprocess_build_json(input: Vec<u8>) -> String {
     out
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(level = "info"), ret)]
 #[defer_drm]
-pub(crate) async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
+async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
     let ctx_msg =
         || format!("failed while trying to build binary for cargo workspace package: {target_pkg}");
 
@@ -526,7 +539,7 @@ pub(crate) async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String
 
 #[tracing::instrument(skip_all)]
 #[defer_drm]
-pub(crate) async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
+async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
 where
     for<'a> T: 'a + Display + Send + Sync + Clone,
 {
@@ -647,7 +660,7 @@ where
 }
 
 #[defer_drm]
-pub(crate) async fn cleanup(mut exe: String) -> anyhow::Result<()> {
+async fn cleanup(mut exe: String) -> anyhow::Result<()> {
     exe.insert_str(0, "./");
 
     Command::new("rm")
