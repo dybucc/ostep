@@ -43,7 +43,8 @@ pub(crate) fn handle_block(block: &mut Block) {
 pub(crate) fn handle_expr(expr: &mut Expr) {
     // NOTE: the recurrence relation is defined in terms of the base case for try
     // expressions (excluding try blocks,) and the case that triggers further
-    // recursive calls (i.e. all other expressions that may be `?`-annotated.)
+    // calls on each expression found within it (i.e. all other expressions that may
+    // be `?`-annotated.)
     match expr {
         // The special case that is handled by this proc-macro.
         Expr::Try(ExprTry { expr, .. }) => {

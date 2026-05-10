@@ -21,14 +21,12 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{MetadataCommand, Package};
 use clap::Parser;
-use crossterm::terminal;
 use futures::{StreamExt, future};
 use rayon::{
     iter::{IntoParallelIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
 use serde_json::Value;
-use tester_impl::defer_drm;
 use tokio::{
     fs,
     process::Command,
@@ -36,7 +34,7 @@ use tokio::{
     task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
-use tracing::{info, subscriber};
+use tracing::info;
 
 use crate::{args::Args, spinner::spinner, test::Test};
 
@@ -46,68 +44,53 @@ mod test;
 
 const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 
-// FIXME(logger): there's some printing statements that only run under
-// `debug_assertions` which should either use some asynchronous `stderr` from
-// `tokio`, or should otherwise be replaced with a proper logger.
+// TODO: fix all instances where we assume terminal raw mode is on, as that is
+// not the case anymore. This means refactoring the `spinner` module.
 
 #[tracing::instrument(skip_all)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    const INIT_ERR: &str = "failed to complete init terminal raw mode task";
-
     if cfg!(trace) {
-        subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_ansi(true)
-                .with_target(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_level(true)
-                .with_writer(Mutex::new(
-                    File::create_new(env::current_dir().map(|pwd| pwd.join("debug.log")).unwrap())
-                        .unwrap(),
-                ))
-                .pretty()
-                .finish(),
-        )?;
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_file(true)
+            .with_line_number(true)
+            .with_level(true)
+            .with_writer(Mutex::new(
+                File::create(env::current_dir().map(|pwd| pwd.join("debug.log")).unwrap()).unwrap(),
+            ))
+            .init();
     }
 
     let (tx, rx) = mpsc::unbounded_channel();
 
-    task::spawn_blocking(terminal::enable_raw_mode)
-        .await
-        .context(INIT_ERR)?
-        .context(INIT_ERR)?;
-
-    // The futures represent the two main threads of execution here; Namely,
+    // NOTE: the futures represent the two main threads of execution here; Namely,
     // (1) the spinner that is always running in the "foreground" to notify of
     //     progress and/or errors, and
     // (2) the worker task that performs all of the testing harness functionality
     //     while occasionally updating the message shown on the spinner.
-    match future::try_join(task::spawn(spinner(rx)), task::spawn(worker(tx))).await? {
-        (err @ Err(_), _) => err.context("failed to handle spinner animation"),
-        (_, res) => res,
-    }
+    future::try_join(task::spawn(spinner(rx)), task::spawn(worker(tx)))
+        .await
+        .context("failed to handle core task management")
+        .map(|(res1, res2)| res1.and(res2))?
 }
 
 #[tracing::instrument(skip_all)]
-#[defer_drm]
 async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
-    info!(target_pkg = target_pkg);
-
     let mut tests = find_tests(tx.clone()).await?;
-    info!(tests = ?tests);
 
     // NOTE: because the below two tasks run concurrently, we prefer not to have
     // them intersperse output so for now we only report the work about to be made,
     // but nothing from within those routines.
-    tx.send("copying executable to `tests/` and parsing tests".into())
+    tx.send("copying executable to `tests/` directory and parsing tests".into())
         .context(MAIN_RX_ERROR)?;
 
     let (tests, exe) = match future::try_join(
         task::spawn_blocking(move || {
             tests.par_sort_unstable_by_key(|&(_, test_num, _)| test_num);
+
+            info!(sorted_tests = true);
 
             tests
         }),
@@ -118,8 +101,9 @@ async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
         Ok((tests, Ok(exe))) => (tests, exe),
         Ok((_, Err(copy_err))) => bail!(copy_err),
         Err(task_err) => {
-            return Err(task_err)
-                .context("failed to handle blocking task to sort tests by entry number");
+            return Err(task_err).context(
+                "failed to manage tasks to sort tests and copy the target executable object",
+            );
         }
     };
 
@@ -131,7 +115,6 @@ async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
 }
 
 #[tracing::instrument(skip_all, ret, err(level = "info"))]
-#[defer_drm]
 async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
     // NOTE: this gets used at the end once a matching package has been found, to
     // both set the pwd to that package's manifest path, and to return the package's
@@ -247,7 +230,6 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
 }
 
 #[tracing::instrument(skip_all, ret, err(level = "info"))]
-#[defer_drm]
 async fn find_tests(
     tx: UnboundedSender<Cow<'static, str>>,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
@@ -312,20 +294,18 @@ async fn find_tests(
     // asynchronous I/O. We specifically gather 3-element tuples consisting of the
     // path to the test file, the entry number of the test and the test type (which
     // itself depends on the test path's file stem's extension.)
-    task::spawn_blocking(move || proc_tests(tasks_result, speculative_cap))
-        .await
-        .context("failed to handle task to manage test entry parsing")?
+    task::block_in_place(move || proc_tests(tasks_result, speculative_cap))
 }
 
 // TODO: finish annotating this and later functions with the corresponding
 // `tracing` event macros. Don't forget about the other modules (especially the
 // `spinner` modulel)
-#[tracing::instrument(skip_all, ret, err(level = "info"))]
+#[tracing::instrument(skip_all)]
 fn proc_tests(
-    tasks_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
+    task_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
     capacity: usize,
 ) -> anyhow::Result<Vec<(PathBuf, usize, OsString)>> {
-    tasks_result
+    task_result
         .into_par_iter()
         .try_fold(
             || Vec::with_capacity(capacity),
@@ -393,10 +373,8 @@ fn proc_tests(
 }
 
 #[tracing::instrument(skip_all, ret, err(level = "info"))]
-#[defer_drm]
 async fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> anyhow::Result<Vec<Test>> {
     let mut task_pool = JoinSet::new();
-
     let num_tests = tests.len();
 
     for (test_path, _, test_extension) in tests {
@@ -432,6 +410,8 @@ async fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> anyhow::Result
                 }
             }
 
+            info!(sucess_parsing_test = true);
+
             anyhow::Ok(test)
         });
     }
@@ -440,6 +420,8 @@ async fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> anyhow::Result
 
     while let Some(res) = task_pool.join_next().await {
         out.push(res.context("failed to handle task management while reading test files")??);
+
+        info!(success_parsing_task = true);
     }
 
     Ok(out)
@@ -449,7 +431,7 @@ async fn produce_tests(tests: Vec<(PathBuf, usize, OsString)>) -> anyhow::Result
 fn preprocess_build_json(input: Vec<u8>) -> String {
     let len = input.len();
 
-    let out = input
+    input
         .into_par_iter()
         .try_fold(
             || String::with_capacity(len),
@@ -468,17 +450,10 @@ fn preprocess_build_json(input: Vec<u8>) -> String {
 
             ControlFlow::Continue(a)
         })
-        .into_value();
-
-    // FIXME(logger):
-    #[cfg(debug_assertions)]
-    eprintln!("{out}");
-
-    out
+        .into_value()
 }
 
-#[tracing::instrument(skip_all, err(level = "info"), ret)]
-#[defer_drm]
+#[tracing::instrument(skip_all, ret, err(level = "info"))]
 async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
     let ctx_msg =
         || format!("failed while trying to build binary for cargo workspace package: {target_pkg}");
@@ -494,22 +469,14 @@ async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
         .with_context(ctx_msg)?
         .stdout;
 
-    // FIXME(logger):
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "copy_exe: {}",
-        String::from_utf8_lossy_owned(cmd_stdout.clone())
-    );
+    info!(copy_exe = %String::from_utf8_lossy_owned(cmd_stdout.clone()));
 
     // NOTE: we don't encode the `executable` key of the JSON in a type nor constant
     // because it's part of the stability guarantees in cargo's output.
-    let exe = if let Value::Object(map) = serde_json::from_str(
-        &task::spawn_blocking(move || preprocess_build_json(cmd_stdout))
-            .await
-            .context("failed to handle task managing cargo build json parsing")?,
-    )
-    .context("failed to parse json output from `cargo-build`")
-    .with_context(ctx_msg)?
+    let exe = if let Value::Object(map) =
+        serde_json::from_str(&task::block_in_place(|| preprocess_build_json(cmd_stdout)))
+            .context("failed to parse json output from `cargo-build`")
+            .with_context(ctx_msg)?
         && let Some(Value::String(exe)) = map.get("executable")
     {
         Ok(PathBuf::from(exe))
@@ -537,8 +504,10 @@ async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
     ))
 }
 
+// TODO: add some events to the below two routines and move on to the `spinner`
+// module.
+
 #[tracing::instrument(skip_all)]
-#[defer_drm]
 async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
 where
     for<'a> T: 'a + Display + Send + Sync + Clone,
@@ -659,7 +628,6 @@ where
     Ok(())
 }
 
-#[defer_drm]
 async fn cleanup(mut exe: String) -> anyhow::Result<()> {
     exe.insert_str(0, "./");
 

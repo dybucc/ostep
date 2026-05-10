@@ -39,6 +39,7 @@ impl Parse for ResultFn {
         Ok(Self(func))
     }
 }
+
 pub(crate) fn ensure_retval(output: &ReturnType) -> bool {
     match output {
         ReturnType::Type(_, ty)

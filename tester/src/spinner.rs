@@ -10,7 +10,6 @@ use crossterm::{
     cursor::MoveToColumn,
     terminal::{Clear, ClearType},
 };
-use tester_impl::defer_drm;
 use tokio::{
     io::{self, AsyncWriteExt, Stdout},
     sync::{
@@ -54,7 +53,6 @@ impl Display for SpinnerState {
 }
 
 #[tracing::instrument(skip_all)]
-#[defer_drm]
 pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> anyhow::Result<()> {
     static SYNC_STDOUT: Mutex<LazyLock<SyncStdout>> =
         Mutex::const_new(LazyLock::new(std_io::stdout));
