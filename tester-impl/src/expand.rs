@@ -52,10 +52,7 @@ pub(crate) fn handle_expr(expr: &mut Expr) {
                 let res = #expr;
 
                 if res.is_err() && ::crossterm::terminal::is_raw_mode_enabled().unwrap() {
-                    ::tokio::task::spawn_blocking(::crossterm::terminal::disable_raw_mode)
-                        .await
-                        .unwrap()
-                        .unwrap();
+                    ::tokio::task::block_in_place(::crossterm::terminal::disable_raw_mode).unwrap();
                 }
 
                 res
