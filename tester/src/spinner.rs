@@ -52,7 +52,7 @@ impl Display for SpinnerState {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(level = "info"))]
 pub(crate) async fn spinner(mut rx: UnboundedReceiver<Cow<'static, str>>) -> anyhow::Result<()> {
     static SYNC_STDOUT: Mutex<LazyLock<SyncStdout>> =
         Mutex::const_new(LazyLock::new(std_io::stdout));

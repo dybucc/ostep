@@ -23,14 +23,17 @@ use cargo_metadata::{MetadataCommand, Package};
 use clap::Parser;
 use futures::{StreamExt, future};
 use rayon::{
-    iter::{IntoParallelIterator, ParallelIterator},
+    iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
     slice::ParallelSliceMut,
 };
 use serde_json::Value;
 use tokio::{
     fs,
     process::Command,
-    sync::mpsc::{self, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedSender},
+        oneshot,
+    },
     task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
@@ -53,9 +56,9 @@ async fn main() -> anyhow::Result<()> {
     if cfg!(trace) {
         tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_file(true)
-            .with_line_number(true)
-            .with_level(true)
+            .with_file(false)
+            .with_line_number(false)
+            .with_level(false)
             .with_writer(Mutex::new(
                 File::create(env::current_dir().map(|pwd| pwd.join("debug.log")).unwrap()).unwrap(),
             ))
@@ -75,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|(res1, res2)| res1.and(res2))?
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(level = "info"))]
 async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
     let target_pkg = find_pkg(tx.clone()).await?;
     let mut tests = find_tests(tx.clone()).await?;
@@ -171,6 +174,9 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
         .context("failed to fetch pwd")
         .context(ERR_MSG)?;
 
+    // TODO: finish working on the below transition from sequential iterators to
+    // parallel iterators.
+
     // NOTE: if there's more than a single package in the working directory, we
     // check two things:
     // + Some workspace package's manifest path matches the pwd, in which case we
@@ -182,39 +188,50 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
     // package we can default to.
     match workspace_packages.len() {
         2.. => {
+            let (tx, rx) = oneshot::channel();
+            let fallback = task::spawn(async move { rx.await });
+
             // NOTE: if we got issued a package name, we ought prioritize finding a package
             // of that name, before attempting to fall back to the package that we may be at
             // in the current working directory.
             if let Some(pkg) = if let Some(cli_name) = Args::parse().package {
-                workspace_packages
-                    .iter()
-                    .try_fold(
-                        None,
-                        |mut fallback_pwd,
-                         pkg @ Package {
-                             name,
-                             manifest_path,
-                             ..
-                         }| {
-                            info!(discovered_pkg = ?pkg);
+                if let Some(pkg) = workspace_packages.par_iter().find_any(
+                    move |&pkg @ Package {
+                              name,
+                              manifest_path,
+                              ..
+                          }| {
+                        info!(discovered_pkg = ?pkg);
 
-                            if *name == cli_name {
-                                return ControlFlow::Break(pkg);
-                            }
+                        if *name == cli_name {
+                            return true;
+                        }
 
-                            if *manifest_path == pwd {
-                                fallback_pwd = pkg.into();
-                            }
+                        if *manifest_path == pwd {
+                            tx.send(pkg);
+                        }
 
-                            ControlFlow::Continue(fallback_pwd)
-                        },
-                    )
-                    .map_break(Some)
-                    .into_value()
+                        false
+                    },
+                ) {
+                    pkg.into()
+                } else {
+                    fallback
+                        .await
+                        .context(
+                            "failed to handle task synchronization while finding package in \
+                             workspace",
+                        )?
+                        .context(
+                            "failed to handle task synchronization while finding package in \
+                             workspace",
+                        )?
+                        .into()
+                }
             } else {
                 workspace_packages
-                    .iter()
-                    .find(|Package { manifest_path, .. }| *manifest_path == pwd)
+                    .par_iter()
+                    .find_any(|Package { manifest_path, .. }| *manifest_path == pwd)
             } {
                 finalize(*pkg)
             } else {
@@ -297,10 +314,6 @@ async fn find_tests(
     task::block_in_place(move || proc_tests(tasks_result, speculative_cap))
 }
 
-// TODO: finish annotating this and later functions with the corresponding
-// `tracing` event macros. Don't forget about the other modules (especially the
-// `spinner` modulel)
-#[tracing::instrument(skip_all)]
 fn proc_tests(
     task_result: Vec<anyhow::Result<(PathBuf, Metadata)>>,
     capacity: usize,
@@ -319,7 +332,7 @@ fn proc_tests(
                                 b"out" | b"err" | b"rc" | b"run" | b"desc" | b"pre" | b"post"
                             )
                         {
-                            info!(valid_test_fd = true, test_fd = %path.display());
+                            info!(valid_test = true, test_path = %path.display());
 
                             let num = path
                                 .file_stem()
@@ -504,9 +517,6 @@ async fn copy_exe<T: Display>(target_pkg: T) -> anyhow::Result<String> {
     ))
 }
 
-// TODO: add some events to the below two routines and move on to the `spinner`
-// module.
-
 #[tracing::instrument(skip_all)]
 async fn run_tests<T>(exe: String, tests: Vec<Test>, target_pkg: T) -> anyhow::Result<()>
 where
@@ -556,6 +566,8 @@ where
                     )
                     .with_context(ctx_msg)?;
 
+                info!(test_number = num, out, err, rc, run);
+
                 let mut program_params = run.split_ascii_whitespace();
                 let bin = program_params
                     .next()
@@ -563,6 +575,8 @@ where
                         "failed to find binary name in `.rc` test file param"
                     ))
                     .with_context(ctx_msg)?;
+
+                info!(test_binary = bin);
 
                 (bin.trim_start_matches(['.', '/']) == exe)
                     .ok_or(anyhow!(
@@ -592,6 +606,10 @@ where
                     ByteStr::new(&output.stdout),
                     ByteStr::new(&output.stderr),
                 );
+
+                info!(status, real_status);
+                info!(%out, %real_out);
+                info!(%err, %real_err);
 
                 (status == real_status)
                     .ok_or(anyhow!(
@@ -628,6 +646,7 @@ where
     Ok(())
 }
 
+#[tracing::instrument(skip_all, err(level = "info"))]
 async fn cleanup(mut exe: String) -> anyhow::Result<()> {
     exe.insert_str(0, "./");
 
@@ -639,5 +658,5 @@ async fn cleanup(mut exe: String) -> anyhow::Result<()> {
         .exit_ok()
         .context("failed to clean up testing resources")?;
 
-    anyhow::Ok(())
+    Ok(())
 }
