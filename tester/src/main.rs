@@ -13,7 +13,7 @@ use std::{
     ffi::{OsStr, OsString},
     fmt::Display,
     fs::{File, Metadata},
-    ops::ControlFlow,
+    ops::{ControlFlow, Deref},
     path::PathBuf,
     sync::Mutex,
 };
@@ -30,10 +30,7 @@ use serde_json::Value;
 use tokio::{
     fs,
     process::Command,
-    sync::{
-        mpsc::{self, UnboundedSender},
-        oneshot,
-    },
+    sync::mpsc::{self, UnboundedSender},
     task::{self, JoinSet},
 };
 use tokio_stream::wrappers::ReadDirStream;
@@ -53,16 +50,19 @@ const MAIN_RX_ERROR: &str = "rx end of main comms channel closed unexpectedly";
 #[tracing::instrument(skip_all)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if cfg!(trace) {
+    if env::var_os("TESTER_TRACE").is_some() {
         tracing_subscriber::fmt()
             .with_ansi(false)
             .with_file(false)
             .with_line_number(false)
             .with_level(false)
             .with_writer(Mutex::new(
-                File::create(env::current_dir().map(|pwd| pwd.join("debug.log")).unwrap()).unwrap(),
+                env::current_dir()
+                    .map(|pwd| pwd.join("debug.log"))
+                    .and_then(File::create)?,
             ))
-            .init();
+            .try_init()
+            .map_err(anyhow::Error::from_boxed)?;
     }
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -119,28 +119,6 @@ async fn worker(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<()> {
 
 #[tracing::instrument(skip_all, ret, err(level = "info"))]
 async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<String> {
-    // NOTE: this gets used at the end once a matching package has been found, to
-    // both set the pwd to that package's manifest path, and to return the package's
-    // name.
-    fn finalize(pkg: impl Borrow<Package>) -> anyhow::Result<String> {
-        let Package {
-            name,
-            manifest_path,
-            ..
-        } = pkg.borrow();
-
-        let pkg_path = manifest_path
-            .parent()
-            .ok_or(anyhow!("pkg manifest path doesn't have a parent dir"))
-            .with_context(|| format!("failed while processing package: {}", *name))?;
-
-        env::set_current_dir(pkg_path)
-            .context("failed to set pwd during initialization")
-            .with_context(|| format!("failed to set pwd to pkg manifest path: {pkg_path}"))?;
-
-        Ok(name.to_string())
-    }
-
     const ERR_MSG: &str = "failed during initialization";
 
     tx.send("parsing cargo workspace".into())
@@ -166,16 +144,10 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
     .context("failed to parse output of `cargo metadata`")
     .context(ERR_MSG)?;
 
-    info!(workspace_metadata = ?workspace_metadata);
-
     let workspace_packages = workspace_metadata.workspace_packages();
-
     let pwd = env::current_dir()
         .context("failed to fetch pwd")
         .context(ERR_MSG)?;
-
-    // TODO: finish working on the below transition from sequential iterators to
-    // parallel iterators.
 
     // NOTE: if there's more than a single package in the working directory, we
     // check two things:
@@ -188,32 +160,53 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
     // package we can default to.
     match workspace_packages.len() {
         2.. => {
-            let (tx, rx) = oneshot::channel();
-            let fallback = task::spawn(async move { rx.await });
+            // NOTE: this would have ideally used a oneshot channel, but that is not
+            // possible when using iterating, as the semantics of iteration (irrespective of
+            // whether such traversal is serial or parallel) do not enforce the fact that
+            // the transmitter is only ever consumed once. The closure runs repeatedly and
+            // even though we know that logically the transmitter will only send once
+            // because the pwd can only correspond with a single package, that is not
+            // encoded as part of the program semantics. We could probably wrap it up in
+            // some type that could use `unsafe` to communicate such meaning to the type
+            // system, but I've decided to go for another type of channel here.
+            let (tx, mut rx) = mpsc::channel(1);
+            let fallback = task::spawn(async move { rx.recv().await });
 
             // NOTE: if we got issued a package name, we ought prioritize finding a package
             // of that name, before attempting to fall back to the package that we may be at
             // in the current working directory.
             if let Some(pkg) = if let Some(cli_name) = Args::parse().package {
-                if let Some(pkg) = workspace_packages.par_iter().find_any(
-                    move |&pkg @ Package {
-                              name,
-                              manifest_path,
-                              ..
-                          }| {
-                        info!(discovered_pkg = ?pkg);
+                if let Some(pkg) = workspace_packages
+                    .par_iter()
+                    .find_any(
+                        move |&&pkg @ Package {
+                                  name,
+                                  manifest_path,
+                                  ..
+                              }| {
+                            info!(discovered_pkg = ?pkg);
 
-                        if *name == cli_name {
-                            return true;
-                        }
+                            if *name == cli_name {
+                                info!(
+                                    "matched pkg `{:?}` with cli-provided pkg `{}`",
+                                    pkg, cli_name,
+                                );
 
-                        if *manifest_path == pwd {
-                            tx.send(pkg);
-                        }
+                                return true;
+                            }
 
-                        false
-                    },
-                ) {
+                            if *manifest_path == pwd {
+                                info!("matched pkg `{:?}` with pkg at pwd", pkg);
+
+                                tx.blocking_send(pkg.clone()).unwrap();
+                            }
+
+                            false
+                        },
+                    )
+                    .map(Deref::deref)
+                    .cloned()
+                {
                     pkg.into()
                 } else {
                     fallback
@@ -232,8 +225,10 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
                 workspace_packages
                     .par_iter()
                     .find_any(|Package { manifest_path, .. }| *manifest_path == pwd)
+                    .map(Deref::deref)
+                    .cloned()
             } {
-                finalize(*pkg)
+                finalize(pkg)
             } else {
                 bail!(
                     "cargo workspace package directory doesn't match pwd and no `-p` package \
@@ -241,9 +236,31 @@ async fn find_pkg(tx: UnboundedSender<Cow<'static, str>>) -> anyhow::Result<Stri
                 );
             }
         }
-        1 => finalize(*workspace_packages.first().unwrap()),
+        1 => finalize(*workspace_packages.first().expect(
+            "there should be at least one element in the list of pkgs if the length of the list \
+             of pkgs has been reported to be the unit",
+        )),
         _ => bail!("no packages found in current workspace: {}", pwd.display()),
     }
+}
+
+fn finalize(pkg: impl Borrow<Package>) -> anyhow::Result<String> {
+    let Package {
+        name,
+        manifest_path,
+        ..
+    } = pkg.borrow();
+
+    let pkg_path = manifest_path
+        .parent()
+        .ok_or(anyhow!("pkg manifest path doesn't have a parent dir"))
+        .with_context(|| format!("failed while processing package: {}", *name))?;
+
+    env::set_current_dir(pkg_path)
+        .context("failed to set pwd during initialization")
+        .with_context(|| format!("failed to set pwd to pkg manifest path: {pkg_path}"))?;
+
+    Ok(name.to_string())
 }
 
 #[tracing::instrument(skip_all, ret, err(level = "info"))]
